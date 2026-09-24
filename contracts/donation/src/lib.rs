@@ -36,6 +36,9 @@ pub struct DonatedEvent {
     pub amount: i128,
     pub memo: String,
     pub timestamp: u64,
+    /// SAC address used for the transfer, so indexers do not have to guess
+    /// which asset a DonatedEvent represents.
+    pub token: Address,
 }
 
 /// Emitted when a supporter starts a recurring donation.
@@ -153,6 +156,7 @@ impl DonationContract {
             amount,
             memo,
             timestamp: env.ledger().timestamp(),
+            token,
         }
         .publish(&env);
 
@@ -300,6 +304,7 @@ impl DonationContract {
             amount: subscription.amount,
             memo,
             timestamp: now,
+            token: subscription.token,
         }
         .publish(&env);
 

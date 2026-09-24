@@ -17,7 +17,10 @@ router.get(
       page: number;
       limit: number;
     };
-    const where = creatorUsername ? { creator: { username: creatorUsername } } : undefined;
+    const where = {
+      ...(creatorUsername ? { creator: { username: creatorUsername } } : {}),
+      verified: true,
+    };
 
     const [items, total] = await Promise.all([
       prisma.donation.findMany({
@@ -29,7 +32,18 @@ router.get(
       prisma.donation.count({ where }),
     ]);
 
-    return res.json({ items, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+    const responseItems = items.map((item) => {
+      const eventId =
+        item.rpcEventId ||
+        item.onChainEventId ||
+        (item.transactionHash ? `${item.transactionHash}:0:0` : undefined);
+      return eventId ? { ...item, eventId } : item;
+    });
+
+    return res.json({
+      items: responseItems,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
   })
 );
 
@@ -40,8 +54,25 @@ router.post(
     const idempotencyKey = req.header("Idempotency-Key")?.trim();
     if (!idempotencyKey) throw new BadRequestError("Idempotency-Key header is required");
 
-    const { creatorUsername, senderAddress, amount, currency, message, transactionHash } = req.body;
+    const {
+      creatorUsername,
+      senderAddress,
+      amount,
+      currency,
+      message,
+      transactionHash,
+    } = req.body;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    // A browser donation transaction currently contains one DonatedEvent, so
+    // the client-facing report uses the canonical operation/event indices 0.
+    // The Soroban listener owns the authoritative index and can reconcile the
+    // row using its RPC-provided event identity.
+    const operationIndex = 0;
+    const eventIndex = 0;
+    const onChainEventId = transactionHash
+      ? `${transactionHash}:${operationIndex}:${eventIndex}`
+      : undefined;
+    const verified = !transactionHash;
 
     const record = async (client: Prisma.TransactionClient) => {
       await client.donationIdempotencyKey.deleteMany({ where: { expiresAt: { lt: new Date() } } });
@@ -55,9 +86,40 @@ router.post(
       const creator = await client.creator.findUnique({ where: { username: creatorUsername } });
       if (!creator) throw new NotFoundError("Creator not found");
 
-      const donation = await client.donation.create({
-        data: { creatorId: creator.id, senderAddress, amount, currency, message, transactionHash },
-      });
+      const donation = onChainEventId
+        ? await client.donation.upsert({
+            where: {
+              transactionHash_operationIndex_eventIndex: {
+                transactionHash,
+                operationIndex,
+                eventIndex,
+              },
+            },
+            update: {},
+            create: {
+              creatorId: creator.id,
+              senderAddress,
+              amount,
+              currency,
+              message,
+              transactionHash,
+              onChainEventId,
+              operationIndex,
+              eventIndex,
+              verified: false,
+            },
+          })
+        : await client.donation.create({
+            data: {
+              creatorId: creator.id,
+              senderAddress,
+              amount,
+              currency,
+              message,
+              transactionHash,
+              verified,
+            },
+          });
       await client.donationIdempotencyKey.create({
         data: { key: idempotencyKey, donationId: donation.id, expiresAt },
       });
@@ -76,7 +138,22 @@ router.post(
           include: { donation: true },
         });
         if (existing && existing.expiresAt > new Date()) donation = existing.donation;
-        else throw error;
+        else if (onChainEventId) {
+          // The event listener may have won the unique on-chain identity race
+          // while this request was being processed. Its row is the canonical
+          // result, so return it rather than surfacing a spurious 500.
+          const onChainDonation = await prisma.donation.findUnique({
+            where: {
+              transactionHash_operationIndex_eventIndex: {
+                transactionHash,
+                operationIndex,
+                eventIndex,
+              },
+            },
+          });
+          if (!onChainDonation) throw error;
+          donation = onChainDonation;
+        } else throw error;
       } else {
         throw error;
       }

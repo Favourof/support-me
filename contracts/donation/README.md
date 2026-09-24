@@ -173,7 +173,7 @@ Data: (creator_address, username)
 ### Donated Event
 ```
 Emitted when donation is made
-Data: (donor_address, creator_address, amount, memo, timestamp)
+Data: (donor_address, creator_address, amount, memo, timestamp, token_address)
 ```
 
 ## Security Considerations
