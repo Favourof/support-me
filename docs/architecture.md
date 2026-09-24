@@ -38,6 +38,10 @@ together.
     `/settings`. Defaults to the SDF reference anchor on testnet.
   - Subscribes to the backend's SSE stream (`EventSource`) on the dashboard
     and public profile pages so new donations appear live without polling.
+  - Detects offline/network-failure states with a persistent retry banner
+    (`components/OfflineBanner.tsx`, `lib/network.ts` `fetchWithRetry`) and
+    renders donation/subscription failure copy from a shared matrix
+    (`lib/failures.ts`, spec in `docs/design/donation-subscription-failure-states.md`).
   - Tested with Vitest + React Testing Library (components, `AuthContext`,
     and the dashboard page's data/SSE behavior).
 
@@ -60,6 +64,13 @@ together.
     `/api/admin/audit-logs`.
   - Centralized error handling (`errors/`, `middleware/errorHandler.ts`) and
     Zod-based request validation (`middleware/validate.ts`, `schemas/`).
+  - Operational health at `GET /health` (Soroban RPC plus the subscription
+    executor's last-run time and recent charge success/failure counts; overall
+    `unhealthy` when the executor hasn't run within its expected interval) and
+    a focused `GET /health/executor` report.
+  - GDPR-style account endpoints (`GET /api/account/export`,
+    `POST /api/account/delete` with a typed confirmation) that anonymize
+    personal fields while preserving on-chain-referenced records.
   - Tested with Jest + Supertest; Prisma is mocked in tests so the suite
     never touches a real database.
 

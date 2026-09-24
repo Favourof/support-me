@@ -15,6 +15,9 @@ model User {
   email          String?
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
+  // Set by POST /api/account/delete when the holder anonymizes their data;
+  // kept as an audit marker (cleared fields are the actual erasure).
+  deletedAt      DateTime?
   creator        Creator?
   adminAuditLogs AdminAuditLog[]
 }
