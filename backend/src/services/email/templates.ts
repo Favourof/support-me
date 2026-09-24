@@ -21,6 +21,12 @@ export interface DonationConfirmationEmailContext {
   transactionHash?: string | null;
 }
 
+export interface MagicLinkEmailContext {
+  /** Full verification URL (includes the token); never logged. */
+  verifyUrl: string;
+  expiresInMinutes: number;
+}
+
 export interface SubscriptionEmailContext {
   creatorName: string;
   amount: number;
@@ -247,6 +253,30 @@ export function donationConfirmationEmail(ctx: DonationConfirmationEmailContext)
     "",
     `Your donation of ${amount} to ${ctx.creatorName} was recorded.`,
     ...(ctx.transactionHash ? [`Transaction: ${ctx.transactionHash}`] : []),
+  ].join("\n");
+
+  return { subject, html, text };
+}
+
+/** The magic-link sign-in email (#15). */
+export function magicLinkEmail(ctx: MagicLinkEmailContext): RenderedEmail {
+  const subject = "Sign in to SupportMe";
+
+  const html = layout(
+    "Sign in to SupportMe",
+    `<p style="margin:0 0 12px;line-height:1.5;">Click below to sign in. This link expires in ${ctx.expiresInMinutes} minutes and can only be used once.</p>
+        <p style="margin:0;font-size:13px;color:#78716c;">If you didn't request this, you can safely ignore this email.</p>`,
+    { label: "Sign in", url: ctx.verifyUrl }
+  );
+
+  const text = [
+    "Sign in to SupportMe",
+    "",
+    `Click below to sign in. This link expires in ${ctx.expiresInMinutes} minutes and can only be used once.`,
+    "",
+    `Sign in: ${ctx.verifyUrl}`,
+    "",
+    "If you didn't request this, you can safely ignore this email.",
   ].join("\n");
 
   return { subject, html, text };

@@ -9,13 +9,36 @@ datasource db {
 
 model User {
   id            Int      @id @default(autoincrement())
-  walletAddress String   @unique
-  // Optional contact address for transactional email (e.g. recurring-donation
-  // renewal / payment-failure notices). Wallet sign-in never requires it.
-  email         String?
+  // Nullable: a magic-link (#15) or OAuth (#14) account has no wallet
+  // until the user connects one. Still unique when set, so a wallet can
+  // never be claimed by more than one account.
+  walletAddress String?  @unique
+  // Contact/sign-in address. Required for a magic-link account (that's
+  // the whole identity); optional for a wallet account, where it's only
+  // used for transactional email (recurring-donation renewal/failure,
+  // donation-received notices).
+  email         String?  @unique
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   creator       Creator?
+  magicLinks    MagicLinkToken[]
+}
+
+// A single-use, short-lived sign-in token emailed to a user for magic-link
+// authentication (#15). Only the SHA-256 hash of the token is stored, the
+// same way the token itself is never logged, so a database read alone
+// can never be used to sign in as someone else.
+model MagicLinkToken {
+  id        Int       @id @default(autoincrement())
+  tokenHash String    @unique
+  email     String
+  userId    Int?
+  user      User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([email])
 }
 
 model Creator {
