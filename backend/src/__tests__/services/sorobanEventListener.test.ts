@@ -106,7 +106,10 @@ describe("SorobanEventListener replay protection", () => {
       1,
       expect.objectContaining({
         where: { rpcEventId: "event-1" },
-        create: expect.objectContaining({ rpcEventId: "event-1" }),
+        create: expect.objectContaining({
+          rpcEventId: "event-1",
+          onChainEventId: "tx-replayed:0:0",
+        }),
       })
     );
     expect(emitted).toHaveBeenCalledTimes(1);
