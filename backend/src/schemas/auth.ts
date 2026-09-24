@@ -17,3 +17,8 @@ export const magicLinkRequestSchema = z.object({
 export const magicLinkVerifySchema = z.object({
   token: z.string().min(1, "token is required"),
 });
+
+export const twitterCallbackSchema = z.object({
+  code: z.string().min(1, "code is required"),
+  state: z.string().min(1, "state is required"),
+});

@@ -15,12 +15,18 @@ jest.mock("../../services/magicLink", () => ({
   verifyMagicLink: jest.fn(),
 }));
 
+jest.mock("../../services/twitterAuth", () => ({
+  startTwitterAuth: jest.fn(),
+  completeTwitterAuth: jest.fn(),
+}));
+
 import { createHash } from "crypto";
 import { Keypair } from "@stellar/stellar-sdk";
 import request from "supertest";
 import app from "../../app";
 import prisma from "../../prisma";
 import { requestMagicLink, verifyMagicLink } from "../../services/magicLink";
+import { completeTwitterAuth, startTwitterAuth } from "../../services/twitterAuth";
 
 const mockedPrisma = prisma as unknown as {
   user: { upsert: jest.Mock };
@@ -28,6 +34,8 @@ const mockedPrisma = prisma as unknown as {
 };
 const mockedRequestMagicLink = requestMagicLink as jest.MockedFunction<typeof requestMagicLink>;
 const mockedVerifyMagicLink = verifyMagicLink as jest.MockedFunction<typeof verifyMagicLink>;
+const mockedStartTwitterAuth = startTwitterAuth as jest.MockedFunction<typeof startTwitterAuth>;
+const mockedCompleteTwitterAuth = completeTwitterAuth as jest.MockedFunction<typeof completeTwitterAuth>;
 
 const STELLAR_SIGNED_MESSAGE_PREFIX = "Stellar Signed Message:\n";
 
@@ -208,5 +216,88 @@ describe("POST /api/auth/magic-link/verify (#15)", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.error).toBe("This magic link has expired");
+  });
+});
+
+describe("GET /api/auth/twitter (#14)", () => {
+  beforeEach(() => {
+    mockedStartTwitterAuth.mockReset();
+  });
+
+  it("returns the redirect URL to start the OAuth flow", async () => {
+    mockedStartTwitterAuth.mockReturnValue("https://twitter.com/i/oauth2/authorize?client_id=x");
+
+    const res = await request(app).get("/api/auth/twitter");
+
+    expect(res.status).toBe(200);
+    expect(res.body.redirectUrl).toBe("https://twitter.com/i/oauth2/authorize?client_id=x");
+  });
+
+  it("returns a 503 when Twitter sign-in is not configured", async () => {
+    const { ServiceUnavailableError } = await import("../../errors/AppError");
+    mockedStartTwitterAuth.mockImplementation(() => {
+      throw new ServiceUnavailableError("Twitter sign-in is not configured");
+    });
+
+    const res = await request(app).get("/api/auth/twitter");
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("SERVICE_UNAVAILABLE");
+  });
+});
+
+describe("GET /api/auth/twitter/callback (#14)", () => {
+  beforeEach(() => {
+    mockedCompleteTwitterAuth.mockReset();
+  });
+
+  it("rejects a callback missing code or state", async () => {
+    const res = await request(app).get("/api/auth/twitter/callback").query({ code: "only-code" });
+
+    expect(res.status).toBe(400);
+    expect(mockedCompleteTwitterAuth).not.toHaveBeenCalled();
+  });
+
+  it("returns a session matching the wallet-auth response shape on success", async () => {
+    mockedCompleteTwitterAuth.mockResolvedValue({
+      user: { id: 5, walletAddress: null },
+      token: "signed.jwt.token",
+      hasProfile: false,
+    });
+
+    const res = await request(app)
+      .get("/api/auth/twitter/callback")
+      .query({ code: "auth-code", state: "state-value" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      user: { id: 5, walletAddress: null },
+      token: "signed.jwt.token",
+      hasProfile: false,
+    });
+    expect(mockedCompleteTwitterAuth).toHaveBeenCalledWith("auth-code", "state-value");
+  });
+
+  it("returns a clear error for an invalid or expired OAuth state", async () => {
+    const { UnauthorizedError } = await import("../../errors/AppError");
+    mockedCompleteTwitterAuth.mockRejectedValue(
+      new UnauthorizedError("Invalid or expired OAuth state, please try again")
+    );
+
+    const res = await request(app)
+      .get("/api/auth/twitter/callback")
+      .query({ code: "auth-code", state: "bad-state" });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("returns a clear error when Twitter denies or the exchange fails", async () => {
+    mockedCompleteTwitterAuth.mockRejectedValue(new Error("Twitter token exchange failed (400): access_denied"));
+
+    const res = await request(app)
+      .get("/api/auth/twitter/callback")
+      .query({ code: "auth-code", state: "state-value" });
+
+    expect(res.status).toBe(500);
   });
 });

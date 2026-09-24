@@ -22,6 +22,30 @@ model User {
   updatedAt     DateTime @updatedAt
   creator       Creator?
   magicLinks    MagicLinkToken[]
+  oauthIdentities OAuthIdentity[]
+}
+
+// Links a third-party OAuth identity (Twitter/X, and any future provider)
+// to a User (#14). provider+providerAccountId is what create-or-attach
+// keys off: a returning user is matched by this pair, not by email, since
+// an OAuth provider's email can be unset, unverified, or reused across
+// providers. Tokens are stored only when the provider requires
+// re-authenticated calls later; SupportMe's Twitter integration only
+// needs the initial profile fetch, so these are optional and unused today,
+// kept for a provider that does need them without a further migration.
+model OAuthIdentity {
+  id                Int      @id @default(autoincrement())
+  provider          String
+  providerAccountId String
+  userId            Int
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken       String?
+  refreshToken      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 // A single-use, short-lived sign-in token emailed to a user for magic-link
