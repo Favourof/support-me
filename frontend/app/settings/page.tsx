@@ -8,6 +8,7 @@ import { ImageUpload01Icon } from '@hugeicons/core-free-icons';
 import { useAuth } from '@/context/AuthContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { AppNav } from '@/components/AppNav';
+import { QrCodeCard } from '@/components/QrCodeCard';
 import { Skeleton } from '@/components/Skeleton';
 import { SOCIAL_PLATFORMS, normalizeSocialValue } from '@/lib/socials';
 import { uploadAvatar } from '@/lib/upload';
@@ -382,6 +383,10 @@ export default function SettingsPage() {
                 {saving ? 'Saving…' : 'Save changes'}
               </button>
             </div>
+          </div>
+
+          <div className="mt-8">
+            <QrCodeCard creator={creator} />
           </div>
         </div>
       </div>

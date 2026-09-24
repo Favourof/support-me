@@ -8,61 +8,33 @@ datasource db {
 }
 
 model User {
-  id            Int      @id @default(autoincrement())
-  // Nullable: a magic-link (#15) or OAuth (#14) account has no wallet
-  // until the user connects one. Still unique when set, so a wallet can
-  // never be claimed by more than one account.
-  walletAddress String?  @unique
-  // Contact/sign-in address. Required for a magic-link account (that's
-  // the whole identity); optional for a wallet account, where it's only
-  // used for transactional email (recurring-donation renewal/failure,
-  // donation-received notices).
-  email         String?  @unique
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  creator       Creator?
-  magicLinks    MagicLinkToken[]
-  oauthIdentities OAuthIdentity[]
+  id             Int             @id @default(autoincrement())
+  walletAddress  String          @unique
+  // Optional contact address for transactional email (e.g. recurring-donation
+  // renewal / payment-failure notices). Wallet sign-in never requires it.
+  email          String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  creator        Creator?
+  adminAuditLogs AdminAuditLog[]
 }
 
-// Links a third-party OAuth identity (Twitter/X, and any future provider)
-// to a User (#14). provider+providerAccountId is what create-or-attach
-// keys off: a returning user is matched by this pair, not by email, since
-// an OAuth provider's email can be unset, unverified, or reused across
-// providers. Tokens are stored only when the provider requires
-// re-authenticated calls later; SupportMe's Twitter integration only
-// needs the initial profile fetch, so these are optional and unused today,
-// kept for a provider that does need them without a further migration.
-model OAuthIdentity {
-  id                Int      @id @default(autoincrement())
-  provider          String
-  providerAccountId String
-  userId            Int
-  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  accessToken       String?
-  refreshToken      String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+model AdminAuditLog {
+  id                 Int      @id @default(autoincrement())
+  adminId            Int?
+  admin              User?    @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  adminWalletAddress String
+  action             String
+  targetType         String
+  targetId           String
+  before             Json?
+  after              Json?
+  requestId          String?
+  createdAt          DateTime @default(now())
 
-  @@unique([provider, providerAccountId])
-  @@index([userId])
-}
-
-// A single-use, short-lived sign-in token emailed to a user for magic-link
-// authentication (#15). Only the SHA-256 hash of the token is stored, the
-// same way the token itself is never logged, so a database read alone
-// can never be used to sign in as someone else.
-model MagicLinkToken {
-  id        Int       @id @default(autoincrement())
-  tokenHash String    @unique
-  email     String
-  userId    Int?
-  user      User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  usedAt    DateTime?
-  createdAt DateTime  @default(now())
-
-  @@index([email])
+  @@index([createdAt, id])
+  @@index([adminId, createdAt])
+  @@index([targetType, targetId])
 }
 
 model Creator {
@@ -83,19 +55,32 @@ model Creator {
   donations     Donation[]
   withdrawals   Withdrawal[]
   subscriptions Subscription[]
+
+  @@index([walletAddress])
 }
 
 model Donation {
-  id              Int      @id @default(autoincrement())
-  creator         Creator  @relation(fields: [creatorId], references: [id])
+  id              Int                     @id @default(autoincrement())
+  creator         Creator                 @relation(fields: [creatorId], references: [id])
   creatorId       Int
   senderAddress   String
   amount          Float
-  currency        String   @default("XLM")
+  currency        String                  @default("XLM")
   message         String?
   transactionHash String?
-  createdAt       DateTime @default(now())
+  // Stable identity for donations discovered from Soroban events. Replaying a
+  // ledger lookback after a restart must not create another row.
+  onChainEventId  String?                 @unique
+  rpcEventId      String?                 @unique
+  operationIndex  Int                     @default(0)
+  eventIndex      Int                     @default(0)
+  // Client-reported rows are provisional until the Soroban listener verifies
+  // the corresponding event; legacy rows remain visible by default.
+  verified        Boolean                 @default(true)
+  createdAt       DateTime                @default(now())
   idempotencyKey  DonationIdempotencyKey?
+
+  @@unique([transactionHash, operationIndex, eventIndex])
 }
 
 model DonationIdempotencyKey {

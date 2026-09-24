@@ -15,6 +15,7 @@ const APPROX_SECONDS_PER_LEDGER = 5;
 // pre-approve. At ~5s/ledger that's 180 days; a single charge interval can
 // never exceed this either, since even one period's allowance must fit.
 export const MAX_TTL_LEDGERS = 3_110_400;
+export const MAX_MEMO_LENGTH = 140;
 export const MAX_CHARGE_INTERVAL_DAYS = Math.floor(
   (MAX_TTL_LEDGERS * APPROX_SECONDS_PER_LEDGER) / 86400
 );
@@ -187,6 +188,11 @@ async function callContract({ contractId = CONTRACT_ID, method, args, signerAddr
  * @returns {Promise<{ hash: string }>}
  */
 export async function sendDonation({ donorAddress, creatorAddress, amount, assetCode = 'XLM', memo, onStatus }) {
+  const memoValue = memo || '';
+  if (new TextEncoder().encode(memoValue).length > MAX_MEMO_LENGTH) {
+    throw new DonationError('simulation', `Message must be ${MAX_MEMO_LENGTH} bytes or fewer.`);
+  }
+
   let tokenId;
   try {
     tokenId = sacContractId(assetCode);
@@ -203,7 +209,7 @@ export async function sendDonation({ donorAddress, creatorAddress, amount, asset
       StellarSdk.nativeToScVal(creatorAddress, { type: 'address' }),
       StellarSdk.nativeToScVal(tokenId, { type: 'address' }),
       StellarSdk.nativeToScVal(amountStroops, { type: 'i128' }),
-      StellarSdk.nativeToScVal(memo || '', { type: 'string' }),
+      StellarSdk.nativeToScVal(memoValue, { type: 'string' }),
     ],
     onStatus,
   });

@@ -60,7 +60,7 @@ export default function DonationForm({ onSend, loading }) {
         <input
           id="memo"
           type="text"
-          maxLength={28}
+          maxLength={140}
           value={memo}
           onChange={e => setMemo(e.target.value)}
           placeholder="Add a kind note…"

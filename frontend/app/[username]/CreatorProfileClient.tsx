@@ -14,6 +14,7 @@ import {
 } from '@/lib/walletErrors';
 import {
   sendDonation,
+  MAX_MEMO_LENGTH,
   approveAllowance,
   subscribe,
   DonationError,
@@ -60,6 +61,7 @@ interface Donation {
   message: string;
   createdAt: string;
   transactionHash?: string;
+  eventId?: string;
 }
 
 export default function CreatorProfileClient({ params }: { params: Promise<{ username: string }> }) {
@@ -146,6 +148,8 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
         memo: string;
         timestamp: number;
         txHash: string;
+        eventId?: string;
+        currency?: string;
       };
       try {
         payload = JSON.parse(event.data);
@@ -156,15 +160,17 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
       if (payload.creator !== creator.walletAddress) return;
 
       setDonations((prev) => {
-        if (prev.some((d) => d.transactionHash === payload.txHash)) return prev;
+        if (!payload.eventId && prev.some((d) => d.transactionHash === payload.txHash)) return prev;
+        if (payload.eventId && prev.some((d) => d.eventId === payload.eventId)) return prev;
         const newDonation: Donation = {
-          id: payload.txHash,
+          id: payload.eventId || payload.txHash,
           senderAddress: payload.donor,
           amount: Number(payload.amount) / 1e7,
-          currency: 'XLM',
+          currency: payload.currency || 'XLM',
           message: payload.memo,
           createdAt: new Date(payload.timestamp * 1000).toISOString(),
           transactionHash: payload.txHash,
+          eventId: payload.eventId,
         };
         return [newDonation, ...prev];
       });
@@ -625,12 +631,12 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
                   id="donation-message"
                   value={donationMessage}
                   onChange={(e) => setDonationMessage(e.target.value)}
-                  maxLength={140}
+                    maxLength={MAX_MEMO_LENGTH}
                   placeholder="Thanks for your work!"
                   className="input-brutal text-sm"
                   rows={3}
                 />
-                <p className="text-xs text-muted mt-1 font-medium">{donationMessage.length}/140</p>
+                  <p className="text-xs text-muted mt-1 font-medium">{donationMessage.length}/{MAX_MEMO_LENGTH}</p>
               </div>
 
               <div className="flex items-center justify-between gap-3">
