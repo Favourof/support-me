@@ -25,7 +25,9 @@ router.get(
       throw new UnauthorizedError("User not found");
     }
 
-    const walletAddress = user.walletAddress;
+    // A wallet-less account (magic-link/OAuth sign-in) owns no wallet-linked
+    // records; the empty string matches no address rows.
+    const walletAddress = user.walletAddress ?? "";
     const [donationsSent, subscriptionsAsSupporter] = await Promise.all([
       prisma.donation.findMany({
         where: { senderAddress: walletAddress },
@@ -116,7 +118,9 @@ router.post(
       });
     }
 
-    const walletAddress = user.walletAddress;
+    // A wallet-less account (magic-link/OAuth sign-in) owns no wallet-linked
+    // records; the empty string matches no address rows.
+    const walletAddress = user.walletAddress ?? "";
     const creator = user.creator;
 
     const operations: Prisma.PrismaPromise<unknown>[] = [

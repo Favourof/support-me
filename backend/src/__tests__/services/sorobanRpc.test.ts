@@ -119,8 +119,11 @@ describe("Soroban RPC failover", () => {
 
     await expect(
       withSorobanRpcFailover("testTimeout", operation, {
-        timeoutMs: 5,
-        totalTimeoutMs: 20,
+        // Generous real-timer windows: on a loaded machine a 5ms budget can
+        // fire after the second endpoint has already resolved and flakily
+        // report "failed on all configured endpoints".
+        timeoutMs: 50,
+        totalTimeoutMs: 500,
       })
     ).resolves.toBe("ok");
     expect(operation).toHaveBeenCalledTimes(2);

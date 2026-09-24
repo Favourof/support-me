@@ -9,10 +9,15 @@ datasource db {
 
 model User {
   id             Int             @id @default(autoincrement())
-  walletAddress  String          @unique
-  // Optional contact address for transactional email (e.g. recurring-donation
-  // renewal / payment-failure notices). Wallet sign-in never requires it.
-  email          String?
+  // Nullable: a magic-link (#15) or OAuth (#14) account has no wallet
+  // until the user connects one. Still unique when set, so a wallet can
+  // never be claimed by more than one account.
+  walletAddress  String?         @unique
+  // Contact/sign-in address. Required for a magic-link account (that's
+  // the whole identity); optional otherwise, where it's only used for
+  // transactional email (recurring-donation renewal/failure, donation
+  // -received notices).
+  email          String?         @unique
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   // Set by POST /api/account/delete when the holder anonymizes their data;
@@ -20,6 +25,42 @@ model User {
   deletedAt      DateTime?
   creator        Creator?
   adminAuditLogs AdminAuditLog[]
+  magicLinks     MagicLinkToken[]
+  oauthIdentities OAuthIdentity[]
+}
+
+// Links a third-party OAuth identity (Twitter/X, and any future provider)
+// to a User (#14). provider+providerAccountId is what create-or-attach
+// keys off: a returning user is matched by this pair, not by email.
+model OAuthIdentity {
+  id                Int      @id @default(autoincrement())
+  provider          String
+  providerAccountId String
+  userId            Int
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken       String?
+  refreshToken      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// A single-use, short-lived sign-in token emailed to a user for magic-link
+// authentication (#15). Only the SHA-256 hash of the token is stored.
+model MagicLinkToken {
+  id        Int       @id @default(autoincrement())
+  tokenHash String    @unique
+  email     String
+  userId    Int?
+  user      User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([email])
+  @@index([userId])
 }
 
 model AdminAuditLog {
