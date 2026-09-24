@@ -37,7 +37,18 @@ talk to each other exclusively through cross-contract calls
   - `charge_subscription` (executor-signed, draws on the allowance): [`0b7f890c3e644b57a964d4069371000a286f8df27ae69f8621c4d0e156e212d5`](https://stellar.expert/explorer/testnet/tx/0b7f890c3e644b57a964d4069371000a286f8df27ae69f8621c4d0e156e212d5)
   - `cancel_subscription` (revokes the remaining allowance in the same tx): [`34d9c3d8d544cfdb390228a82372d64755c8f479fca4d959bb4e47b9ec0a4414`](https://stellar.expert/explorer/testnet/tx/34d9c3d8d544cfdb390228a82372d64755c8f479fca4d959bb4e47b9ec0a4414)
 
-**The live demo still runs on v1** — going live on v2 means updating `NEXT_PUBLIC_DONATION_CONTRACT_ID`/`NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` on Vercel and setting `EXECUTOR_SECRET_KEY` on Railway, both left as a manual step (see "What's New (v5)" above).
+**The live demo (support-mee.vercel.app) still runs on v1.** A fresh local
+checkout's `.env.local` and `backend/.env.example` now default to the v2
+addresses above (both v2 contracts are live on testnet and were confirmed
+reachable via `stellar contract info interface` — same public interface
+shape as v1, so this is a drop-in swap, not a breaking change for any
+existing caller). Promoting the *live* demo to v2 is still a manual,
+deliberate step: update `NEXT_PUBLIC_DONATION_CONTRACT_ID`/
+`NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID` on Vercel and set
+`EXECUTOR_SECRET_KEY` on Railway (see "What's New (v5)" above). That
+production repoint is intentionally left for a maintainer to trigger, not
+done as part of an automated change — flipping a live, user-facing
+deployment's contract addresses is a deliberate release action.
 
 The frontend calls the `donation` contract directly from
 `frontend/lib/contract.js` (simulate → sign → submit → poll for
@@ -310,7 +321,8 @@ NODE_ENV=development
 
 # Optional: enables the Soroban event listener that powers /api/events (SSE).
 # Without this set, the backend logs a warning and skips event polling.
-NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLFI7SSXICYY
+# v2 (adds recurring donations/subscriptions) - see the contract table above.
+NEXT_PUBLIC_DONATION_CONTRACT_ID=CAO2UABEB4A3EYFTWCMOSTFAUZ5FBSFRESQGWQHOLASZ3RHDCQHQG2LP
 # SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 # SOROBAN_EVENTS_POLL_INTERVAL_MS=5000
 # SOROBAN_EVENTS_LOOKBACK_LEDGERS=100
@@ -326,8 +338,9 @@ NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLF
 ### Frontend (.env.local)
 
 ```env
-NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLFI7SSXICYY
-NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID=CCJL2GIWNNWECKGSEY2EXEGKBMN2LYJ3HVNJNZEO2AUXC4LRR7THG2U6
+# v2 (adds recurring donations/subscriptions) - see the contract table above.
+NEXT_PUBLIC_DONATION_CONTRACT_ID=CAO2UABEB4A3EYFTWCMOSTFAUZ5FBSFRESQGWQHOLASZ3RHDCQHQG2LP
+NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID=CB6PH7KYI3UHAUNYIJVCV7CT6BOBROLSR4LSZB3WSGFOYOW6JFAF5NDU
 NEXT_PUBLIC_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 
 # SEP-24 cash-out anchor. Optional — if unset, the app defaults to the SDF
