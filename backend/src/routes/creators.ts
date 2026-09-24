@@ -48,7 +48,9 @@ router.get(
         orderBy,
         skip: (page - 1) * limit,
         take: limit,
-        include: { _count: { select: { donations: true } } },
+        include: {
+          _count: { select: { donations: { where: { verified: true } } } },
+        },
       }),
       prisma.creator.count({ where }),
     ]);

@@ -18,10 +18,12 @@ router.get(
         prisma.user.count(),
         prisma.creator.count(),
         prisma.donation.groupBy({
+          where: { verified: true },
           by: ["currency"],
           _sum: { amount: true },
         }),
         prisma.donation.groupBy({
+          where: { verified: true },
           by: ["creatorId", "currency"],
           _sum: { amount: true },
         }),

@@ -8,6 +8,7 @@ jest.mock("../../prisma", () => ({
       findMany: jest.fn(),
       count: jest.fn(),
       create: jest.fn(),
+      upsert: jest.fn(),
     },
     donationIdempotencyKey: {
       deleteMany: jest.fn(),
@@ -25,7 +26,7 @@ import prisma from "../../prisma";
 
 const mockedPrisma = prisma as unknown as {
   creator: { findUnique: jest.Mock };
-  donation: { findMany: jest.Mock; count: jest.Mock; create: jest.Mock };
+  donation: { findMany: jest.Mock; count: jest.Mock; create: jest.Mock; upsert: jest.Mock };
   donationIdempotencyKey: {
     deleteMany: jest.Mock;
     findUnique: jest.Mock;
@@ -54,10 +55,20 @@ describe("GET /api/donations", () => {
     expect(res.body).toEqual({ items: donations, pagination: { page: 1, limit: 20, total: 0, totalPages: 0 } });
     expect(mockedPrisma.donation.findMany).toHaveBeenCalledWith({
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      where: undefined,
+      where: { verified: true },
       skip: 0,
       take: 20,
     });
+  });
+
+  it("exposes the durable on-chain identity as eventId", async () => {
+    mockedPrisma.donation.findMany.mockResolvedValue([
+      { id: 1, transactionHash: "tx-1", onChainEventId: "tx-1:0:0" },
+    ]);
+
+    const res = await request(app).get("/api/donations");
+
+    expect(res.body.items[0].eventId).toBe("tx-1:0:0");
   });
 
   it("filters by creatorUsername when provided as a query param", async () => {
@@ -67,7 +78,7 @@ describe("GET /api/donations", () => {
 
     expect(mockedPrisma.donation.findMany).toHaveBeenCalledWith({
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      where: { creator: { username: "bob" } },
+      where: { creator: { username: "bob" }, verified: true },
       skip: 0,
       take: 20,
     });
@@ -139,7 +150,45 @@ describe("POST /api/donations", () => {
         currency: "XLM",
         message: "nice work",
         transactionHash: undefined,
+        verified: true,
       },
+    });
+  });
+
+  it("upserts a reported on-chain event by transaction and event index", async () => {
+    const created = { id: 2, creatorId: 7, amount: 1.5, transactionHash: "tx-1" };
+    mockedPrisma.creator.findUnique.mockResolvedValue({ id: 7, username: "bob" });
+    mockedPrisma.donation.upsert.mockResolvedValue(created);
+
+    const res = await request(app)
+      .post("/api/donations")
+      .set("Idempotency-Key", "donation-2")
+      .send({
+        creatorUsername: "bob",
+        senderAddress:
+          "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW",
+        amount: 1.5,
+        transactionHash: "tx-1",
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual(created);
+    expect(mockedPrisma.donation.upsert).toHaveBeenCalledWith({
+      where: {
+        transactionHash_operationIndex_eventIndex: {
+          transactionHash: "tx-1",
+          operationIndex: 0,
+          eventIndex: 0,
+        },
+      },
+      update: {},
+      create: expect.objectContaining({
+        transactionHash: "tx-1",
+        onChainEventId: "tx-1:0:0",
+        operationIndex: 0,
+        eventIndex: 0,
+        verified: false,
+      }),
     });
   });
 

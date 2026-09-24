@@ -61,6 +61,7 @@ interface Donation {
   message: string;
   createdAt: string;
   transactionHash?: string;
+  eventId?: string;
 }
 
 export default function CreatorProfileClient({ params }: { params: Promise<{ username: string }> }) {
@@ -147,6 +148,8 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
         memo: string;
         timestamp: number;
         txHash: string;
+        eventId?: string;
+        currency?: string;
       };
       try {
         payload = JSON.parse(event.data);
@@ -157,15 +160,17 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
       if (payload.creator !== creator.walletAddress) return;
 
       setDonations((prev) => {
-        if (prev.some((d) => d.transactionHash === payload.txHash)) return prev;
+        if (!payload.eventId && prev.some((d) => d.transactionHash === payload.txHash)) return prev;
+        if (payload.eventId && prev.some((d) => d.eventId === payload.eventId)) return prev;
         const newDonation: Donation = {
-          id: payload.txHash,
+          id: payload.eventId || payload.txHash,
           senderAddress: payload.donor,
           amount: Number(payload.amount) / 1e7,
-          currency: 'XLM',
+          currency: payload.currency || 'XLM',
           message: payload.memo,
           createdAt: new Date(payload.timestamp * 1000).toISOString(),
           transactionHash: payload.txHash,
+          eventId: payload.eventId,
         };
         return [newDonation, ...prev];
       });

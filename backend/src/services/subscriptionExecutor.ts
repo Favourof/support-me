@@ -5,7 +5,6 @@ import {
   Networks,
   TransactionBuilder,
   nativeToScVal,
-  rpc,
 } from "@stellar/stellar-sdk";
 import prisma from "../prisma";
 import { Subscription } from "@prisma/client";
@@ -13,12 +12,18 @@ import {
   notifySubscriptionPaymentFailed,
   notifySubscriptionRenewed,
 } from "./subscriptionNotifications";
+import { withSorobanRpcServer } from "./sorobanRpc";
 
-const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE = Networks.TESTNET;
-const DONATION_CONTRACT_ID = process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
-const EXECUTOR_SECRET_KEY = process.env.EXECUTOR_SECRET_KEY;
-const POLL_INTERVAL_MS = Number(process.env.SUBSCRIPTION_EXECUTOR_POLL_INTERVAL_MS) || 60_000;
+
+const getDonationContractId = (): string | undefined =>
+  process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID?.trim() || undefined;
+const getExecutorSecretKey = (): string | undefined =>
+  process.env.EXECUTOR_SECRET_KEY?.trim() || undefined;
+const getPollIntervalMs = (): number => {
+  const configured = Number(process.env.SUBSCRIPTION_EXECUTOR_POLL_INTERVAL_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : 60_000;
+};
 
 /**
  * Periodically charges due recurring-donation subscriptions by calling the
@@ -37,19 +42,20 @@ const POLL_INTERVAL_MS = Number(process.env.SUBSCRIPTION_EXECUTOR_POLL_INTERVAL_
  * Mirrors `SorobanEventListener`'s start()/stop()/setInterval() shape.
  */
 export class SubscriptionExecutor {
-  private server = new rpc.Server(RPC_URL);
   private keypair: Keypair | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
   start(): void {
-    if (!DONATION_CONTRACT_ID) {
+    const donationContractId = getDonationContractId();
+    if (!donationContractId) {
       console.warn(
         "SubscriptionExecutor: NEXT_PUBLIC_DONATION_CONTRACT_ID is not set, skipping."
       );
       return;
     }
-    if (!EXECUTOR_SECRET_KEY) {
+    const executorSecretKey = getExecutorSecretKey();
+    if (!executorSecretKey) {
       console.warn(
         "SubscriptionExecutor: EXECUTOR_SECRET_KEY is not set, recurring donations will not be charged."
       );
@@ -57,13 +63,14 @@ export class SubscriptionExecutor {
     }
     if (this.timer) return;
 
-    this.keypair = Keypair.fromSecret(EXECUTOR_SECRET_KEY);
+    this.keypair = Keypair.fromSecret(executorSecretKey);
+    const pollIntervalMs = getPollIntervalMs();
     this.timer = setInterval(() => {
       void this.tick();
-    }, POLL_INTERVAL_MS);
+    }, pollIntervalMs);
     void this.tick();
     console.log(
-      `SubscriptionExecutor: charging due subscriptions every ${POLL_INTERVAL_MS}ms as ${this.keypair.publicKey()}`
+      `SubscriptionExecutor: charging due subscriptions every ${pollIntervalMs}ms as ${this.keypair.publicKey()}`
     );
   }
 
@@ -112,15 +119,28 @@ export class SubscriptionExecutor {
     }
 
     const nextChargeAt = new Date(Date.now() + subscription.intervalSecs * 1000);
+    const onChainEventId = `${hash}:0:0`;
     await prisma.$transaction([
-      prisma.donation.create({
-        data: {
+      prisma.donation.upsert({
+        where: {
+          transactionHash_operationIndex_eventIndex: {
+            transactionHash: hash,
+            operationIndex: 0,
+            eventIndex: 0,
+          },
+        },
+        update: {},
+        create: {
           creatorId: subscription.creatorId,
           senderAddress: subscription.supporterAddress,
           amount: subscription.amount,
           currency: subscription.token,
           message: "Recurring donation",
           transactionHash: hash,
+          onChainEventId,
+          operationIndex: 0,
+          eventIndex: 0,
+          verified: true,
         },
       }),
       prisma.subscription.update({
@@ -183,8 +203,15 @@ export class SubscriptionExecutor {
    */
   protected async submitCharge(subscription: Subscription): Promise<string> {
     const keypair = this.keypair!;
-    const account = await this.server.getAccount(keypair.publicKey());
-    const contract = new Contract(DONATION_CONTRACT_ID!);
+    const contractId = getDonationContractId();
+    if (!contractId) {
+      throw new Error("Donation contract is not configured");
+    }
+
+    const account = await withSorobanRpcServer("getAccount", (server) =>
+      server.getAccount(keypair.publicKey())
+    );
+    const contract = new Contract(contractId);
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -200,16 +227,38 @@ export class SubscriptionExecutor {
       .setTimeout(60)
       .build();
 
-    const prepared = await this.server.prepareTransaction(tx);
+    const prepared = await withSorobanRpcServer("prepareTransaction", (server) =>
+      server.prepareTransaction(tx)
+    );
     prepared.sign(keypair);
 
-    const sendResult = await this.server.sendTransaction(prepared);
-    return this.confirm(sendResult.hash);
+    // The same signed XDR is submitted to each endpoint. A timeout can happen
+    // after the network accepted the transaction, so a fallback must never
+    // rebuild (and potentially re-sequence) the transaction.
+    const transactionHash = prepared.hash().toString("hex");
+    try {
+      const sendResult = await withSorobanRpcServer("sendTransaction", (server) =>
+        server.sendTransaction(prepared)
+      );
+      return this.confirm(sendResult.hash || transactionHash);
+    } catch (error) {
+      // All endpoints may have timed out after accepting the transaction. Try
+      // the locally computable hash before reporting a failure and retrying the
+      // charge on the next executor tick.
+      try {
+        await this.confirm(transactionHash);
+        return transactionHash;
+      } catch {
+        throw error;
+      }
+    }
   }
 
   private async confirm(hash: string): Promise<string> {
     for (let i = 0; i < 30; i++) {
-      const result = await this.server.getTransaction(hash);
+      const result = await withSorobanRpcServer("getTransaction", (server) =>
+        server.getTransaction(hash)
+      );
       if (result.status === "SUCCESS") return hash;
       if (result.status === "FAILED") {
         throw new Error(`Transaction ${hash} failed on-chain`);

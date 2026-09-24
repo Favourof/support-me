@@ -14,7 +14,10 @@ talk to each other exclusively through cross-contract calls
 
 - **`donation`** moves the donated XLM from donor to creator via the native
   Stellar Asset Contract, keeps an append-only on-chain log of donations, and
-  reports every settled donation to the registry.
+  reports every settled donation to the registry. `DonatedEvent` includes the
+  transferred SAC token address so off-chain indexers can classify USDC as well
+  as native XLM; deployments using the listener should use a contract build
+  containing this event field.
 - **`creator-registry`** owns creator profile state (username, lifetime
   totals) and only accepts `record_donation` calls from the donation contract
   address it was initialized with.
@@ -207,9 +210,11 @@ cp .env.example .env
 # Generate the Prisma client
 npm run prisma:generate
 
-# Push the schema to your database (creates the User/Creator/Donation tables).
-# There is no migrations/ folder in this repo, so use `db push` rather than
-# `prisma:migrate` - it syncs schema.prisma directly to the database:
+# Push the schema to your database (creates the User/Creator/Donation and
+# AdminAuditLog tables). There is no migrations/ folder in this repo, so use
+# `db push` rather than `prisma:migrate` - it syncs schema.prisma directly to
+# the database. Reconcile historical duplicate on-chain identities before
+# applying the new unique constraint to a populated database.
 npx prisma db push
 
 # Start the development server
@@ -269,7 +274,8 @@ Frontend will run on `http://localhost:3000`
 
 - `GET /api/donations` - List donations (query: `creatorUsername`, `page`, and `limit`; default limit 20, maximum 100)
 - `POST /api/donations` - Record a donation (requires an `Idempotency-Key` header; keys are retained for 24 hours)
-  - Body: `{ creatorUsername, senderAddress, amount, message, transactionHash }`
+  - Body: `{ creatorUsername, senderAddress, amount, message, transactionHash }` (the listener derives operation/event indices from RPC)
+  - When an on-chain transaction hash is supplied, the record is upserted by the durable on-chain identity rather than inserted again on replay. Browser-reported rows are provisional until the listener verifies the event.
 
 ### Subscriptions (recurring donations)
 
@@ -279,12 +285,19 @@ Frontend will run on `http://localhost:3000`
   - Idempotent on `onChainId` (globally unique, assigned by the donation contract)
 - `POST /api/subscriptions/:id/cancel` - Mark a subscription cancelled after the caller cancelled it on-chain (requires auth, owner only)
 
+### Admin
+
+- `GET /api/admin/overview` - View platform/user earnings (requires a wallet in `ADMIN_WALLETS`)
+- `GET /api/admin/audit-logs?page=1&limit=20` - View recent privileged actions and before/after snapshots (requires an allowlisted admin)
+
 ### Real-Time Events
 
 - `GET /api/events` - Server-Sent Events stream of on-chain donations. The
   backend's `SorobanEventListener` polls the Soroban RPC for the `donation`
   contract's `DonatedEvent`s and republishes them here as they're seen
-  (`event: donation`, `data: { donor, creator, amount, memo, timestamp, txHash }`).
+  (`event: donation`, `data: { donor, creator, amount, memo, timestamp, txHash, eventId, currency }`).
+  Events are indexed idempotently by transaction hash, operation index, and
+  event index, so a restart/lookback replay cannot double-count a donation.
   The frontend dashboard and creator profile pages subscribe with
   `EventSource` to update live without polling the REST API.
 
@@ -297,6 +310,8 @@ Frontend will run on `http://localhost:3000`
 - `/[username]` - Public creator profile
 - `/app/subscriptions` - Manage and cancel your recurring donations (protected)
 - `/donate` - Redirects to home (legacy route)
+- `/admin` - Allowlisted admin overview (earnings and user audit summary)
+- `/admin/audit` - Recent privileged admin actions (allowlisted admins only)
 
 ## Environment Variables
 
@@ -311,9 +326,17 @@ NODE_ENV=development
 # Optional: enables the Soroban event listener that powers /api/events (SSE).
 # Without this set, the backend logs a warning and skips event polling.
 NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLFI7SSXICYY
+# Prefer a comma-separated failover pool. The singular setting remains supported.
+# SOROBAN_RPC_URLS=https://soroban-testnet.stellar.org,https://backup-soroban.example/rpc
 # SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+# SOROBAN_RPC_TIMEOUT_MS=10000
+# SOROBAN_USDC_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA
+# SOROBAN_USDC_TOKEN_ID=...
 # SOROBAN_EVENTS_POLL_INTERVAL_MS=5000
 # SOROBAN_EVENTS_LOOKBACK_LEDGERS=100
+
+# Required for /api/admin/*; comma-separated Stellar wallet allowlist.
+# ADMIN_WALLETS=GADMIN...
 
 # Optional: enables the SubscriptionExecutor that auto-charges due recurring
 # donations. Without this set, the backend logs a warning and skips
@@ -329,6 +352,8 @@ NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLF
 NEXT_PUBLIC_DONATION_CONTRACT_ID=CD6T563YCSYQHDMXC7VCFTKMWMXWHFHAU4NO7EAMFK57QLFI7SSXICYY
 NEXT_PUBLIC_CREATOR_REGISTRY_CONTRACT_ID=CCJL2GIWNNWECKGSEY2EXEGKBMN2LYJ3HVNJNZEO2AUXC4LRR7THG2U6
 NEXT_PUBLIC_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+# Client-side UX gate for /admin; backend ADMIN_WALLETS remains authoritative.
+# NEXT_PUBLIC_ADMIN_WALLETS=GADMIN...
 
 # SEP-24 cash-out anchor. Optional — if unset, the app defaults to the SDF
 # reference anchor (testanchor.stellar.org / SRT). For local development

@@ -47,18 +47,26 @@ together.
     wallet-signature-based auth (JWT), and a denormalized donation history
     used for dashboard queries/stats.
   - Polls the Soroban RPC for `donation` contract events
-    (`services/sorobanEventListener.ts`) and republishes them on an
-    in-process event bus, which `routes/events.ts` streams to connected
-    clients over Server-Sent Events.
+    (`services/sorobanEventListener.ts`) through a failover endpoint pool,
+    idempotently indexes each event by its on-chain identity, and republishes
+    it on an in-process event bus, which `routes/events.ts` streams to
+    connected clients over Server-Sent Events. Browser-reported rows are
+    provisional until the listener verifies the corresponding event.
+  - All backend Soroban reads (health, event polling, and subscription
+    execution) share `services/sorobanRpc.ts`, which supports
+    `SOROBAN_RPC_URLS` and logs the endpoint that served each request.
+  - Privileged admin access and state-changing admin actions are recorded in
+    the append-only `AdminAuditLog` table and exposed at
+    `/api/admin/audit-logs`.
   - Centralized error handling (`errors/`, `middleware/errorHandler.ts`) and
     Zod-based request validation (`middleware/validate.ts`, `schemas/`).
   - Tested with Jest + Supertest; Prisma is mocked in tests so the suite
     never touches a real database.
 
 - **Database**: PostgreSQL
-  - Stores `User`, `Creator`, and `Donation` records (see README for the
-    schema). Compatible with any PostgreSQL-compatible host (the deployed
-    instance runs on Railway).
+  - Stores `User`, `Creator`, `Donation`, and `AdminAuditLog` records (see
+    README for the schema). Compatible with any PostgreSQL-compatible host
+    (the deployed instance runs on Railway).
 
 - **CI**: `.github/workflows/ci.yml`
   - Three independent GitHub Actions jobs run on every push/PR to `main`:

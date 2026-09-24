@@ -8,6 +8,9 @@ export interface DonationEvent {
   timestamp: number;
   ledger: number;
   txHash: string;
+  /** Stable RPC event identity, when supplied by the listener. */
+  eventId?: string;
+  currency?: string;
 }
 
 export const DONATION_EVENT = "donation";

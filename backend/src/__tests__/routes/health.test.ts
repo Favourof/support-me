@@ -34,6 +34,9 @@ describe("unknown routes", () => {
   it("returns a structured 404", async () => {
     const res = await request(app).get("/api/does-not-exist");
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: "Not Found", code: "NOT_FOUND" });
+    expect(res.body).toEqual(
+      expect.objectContaining({ error: "Not Found", code: "NOT_FOUND" })
+    );
+    expect(typeof res.body.requestId).toBe("string");
   });
 });

@@ -8,14 +8,33 @@ datasource db {
 }
 
 model User {
-  id            Int      @id @default(autoincrement())
-  walletAddress String   @unique
+  id             Int             @id @default(autoincrement())
+  walletAddress  String          @unique
   // Optional contact address for transactional email (e.g. recurring-donation
   // renewal / payment-failure notices). Wallet sign-in never requires it.
-  email         String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  creator       Creator?
+  email          String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  creator        Creator?
+  adminAuditLogs AdminAuditLog[]
+}
+
+model AdminAuditLog {
+  id                 Int      @id @default(autoincrement())
+  adminId            Int?
+  admin              User?    @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  adminWalletAddress String
+  action             String
+  targetType         String
+  targetId           String
+  before             Json?
+  after              Json?
+  requestId          String?
+  createdAt          DateTime @default(now())
+
+  @@index([createdAt, id])
+  @@index([adminId, createdAt])
+  @@index([targetType, targetId])
 }
 
 model Creator {
@@ -36,19 +55,32 @@ model Creator {
   donations     Donation[]
   withdrawals   Withdrawal[]
   subscriptions Subscription[]
+
+  @@index([walletAddress])
 }
 
 model Donation {
-  id              Int      @id @default(autoincrement())
-  creator         Creator  @relation(fields: [creatorId], references: [id])
+  id              Int                     @id @default(autoincrement())
+  creator         Creator                 @relation(fields: [creatorId], references: [id])
   creatorId       Int
   senderAddress   String
   amount          Float
-  currency        String   @default("XLM")
+  currency        String                  @default("XLM")
   message         String?
   transactionHash String?
-  createdAt       DateTime @default(now())
+  // Stable identity for donations discovered from Soroban events. Replaying a
+  // ledger lookback after a restart must not create another row.
+  onChainEventId  String?                 @unique
+  rpcEventId      String?                 @unique
+  operationIndex  Int                     @default(0)
+  eventIndex      Int                     @default(0)
+  // Client-reported rows are provisional until the Soroban listener verifies
+  // the corresponding event; legacy rows remain visible by default.
+  verified        Boolean                 @default(true)
+  createdAt       DateTime                @default(now())
   idempotencyKey  DonationIdempotencyKey?
+
+  @@unique([transactionHash, operationIndex, eventIndex])
 }
 
 model DonationIdempotencyKey {
