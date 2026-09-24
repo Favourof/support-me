@@ -8,6 +8,9 @@ jest.mock("../../prisma", () => ({
       update: jest.fn(),
       count: jest.fn(),
     },
+    donation: {
+      groupBy: jest.fn(),
+    },
   },
 }));
 
@@ -15,6 +18,7 @@ import request from "supertest";
 import app from "../../app";
 import prisma from "../../prisma";
 import { generateToken } from "../../middleware/auth";
+import { leaderboardCache } from "../../routes/creators";
 
 const mockedPrisma = prisma as unknown as {
   creator: {
@@ -23,6 +27,9 @@ const mockedPrisma = prisma as unknown as {
     create: jest.Mock;
     update: jest.Mock;
     count: jest.Mock;
+  };
+  donation: {
+    groupBy: jest.Mock;
   };
 };
 
@@ -233,5 +240,148 @@ describe("PUT /api/creators/:username", () => {
       where: { username: "bob" },
       data: { bio: "hi there" },
     });
+  });
+});
+
+describe("GET /api/creators/leaderboard (#16)", () => {
+  beforeEach(() => {
+    // Each test uses its own type/currency combo except the caching test,
+    // which deliberately keys on a currency ("EURC") no other test in this
+    // file touches — but clearing between tests keeps that independence
+    // explicit instead of implicit.
+    leaderboardCache.clear();
+  });
+
+  it("ranks top creators by total received, defaulting to XLM", async () => {
+    mockedPrisma.donation.groupBy.mockResolvedValue([
+      { creatorId: 1, _sum: { amount: 500 }, _count: { _all: 10 } },
+      { creatorId: 2, _sum: { amount: 200 }, _count: { _all: 3 } },
+    ]);
+    mockedPrisma.creator.findMany.mockResolvedValue([
+      { id: 1, username: "alice", displayName: "Alice", avatarUrl: null },
+      { id: 2, username: "bob", displayName: null, avatarUrl: null },
+    ]);
+
+    const res = await request(app).get("/api/creators/leaderboard");
+
+    expect(res.status).toBe(200);
+    expect(res.body.currency).toBe("XLM");
+    expect(res.body.items).toEqual([
+      {
+        rank: 1,
+        total: 500,
+        donationCount: 10,
+        creator: { id: 1, username: "alice", displayName: "Alice", avatarUrl: null },
+      },
+      {
+        rank: 2,
+        total: 200,
+        donationCount: 3,
+        creator: { id: 2, username: "bob", displayName: null, avatarUrl: null },
+      },
+    ]);
+    expect(mockedPrisma.donation.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: ["creatorId"],
+        where: { currency: "XLM" },
+        orderBy: { _sum: { amount: "desc" } },
+      })
+    );
+  });
+
+  it("ranks top supporters by total given when type=supporters", async () => {
+    mockedPrisma.donation.groupBy.mockResolvedValue([
+      { senderAddress: "GADDRESS1", _sum: { amount: 100 }, _count: { _all: 2 } },
+    ]);
+
+    const res = await request(app).get("/api/creators/leaderboard?type=supporters");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toEqual([
+      { rank: 1, total: 100, donationCount: 2, senderAddress: "GADDRESS1" },
+    ]);
+    expect(mockedPrisma.donation.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({ by: ["senderAddress"], where: { currency: "XLM" } })
+    );
+    // Supporters are ranked by wallet address, not matched to a creator record.
+    expect(mockedPrisma.creator.findMany).not.toHaveBeenCalled();
+  });
+
+  it("ranks a non-default currency independently, never mixing totals across currencies", async () => {
+    mockedPrisma.donation.groupBy.mockResolvedValue([
+      { creatorId: 1, _sum: { amount: 42 }, _count: { _all: 1 } },
+    ]);
+    mockedPrisma.creator.findMany.mockResolvedValue([
+      { id: 1, username: "alice", displayName: null, avatarUrl: null },
+    ]);
+
+    const res = await request(app).get("/api/creators/leaderboard?currency=USDC");
+
+    expect(res.status).toBe(200);
+    expect(res.body.currency).toBe("USDC");
+    expect(mockedPrisma.donation.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { currency: "USDC" } })
+    );
+  });
+
+  it("paginates the ranked results", async () => {
+    mockedPrisma.donation.groupBy.mockResolvedValue(
+      Array.from({ length: 5 }, (_, i) => ({
+        creatorId: i + 1,
+        _sum: { amount: 100 - i },
+        _count: { _all: 1 },
+      }))
+    );
+    mockedPrisma.creator.findMany.mockResolvedValue(
+      Array.from({ length: 5 }, (_, i) => ({
+        id: i + 1,
+        username: `creator${i + 1}`,
+        displayName: null,
+        avatarUrl: null,
+      }))
+    );
+
+    const res = await request(app).get("/api/creators/leaderboard?page=2&limit=2");
+
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    expect(res.body.items[0].rank).toBe(3);
+    expect(res.body.pagination).toEqual({ page: 2, limit: 2, total: 5, totalPages: 3 });
+  });
+
+  it("excludes a creator from the ranking if their record no longer exists (defensive against a deleted creator)", async () => {
+    mockedPrisma.donation.groupBy.mockResolvedValue([
+      { creatorId: 1, _sum: { amount: 50 }, _count: { _all: 1 } },
+      { creatorId: 999, _sum: { amount: 999 }, _count: { _all: 1 } },
+    ]);
+    mockedPrisma.creator.findMany.mockResolvedValue([
+      { id: 1, username: "alice", displayName: null, avatarUrl: null },
+    ]);
+
+    const res = await request(app).get("/api/creators/leaderboard");
+
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].creator.id).toBe(1);
+  });
+
+  it("rejects an invalid leaderboard type", async () => {
+    const res = await request(app).get("/api/creators/leaderboard?type=nonsense");
+    expect(res.status).toBe(400);
+  });
+
+  it("serves a second request for the same type/currency from cache without querying again", async () => {
+    mockedPrisma.donation.groupBy.mockResolvedValue([
+      { creatorId: 1, _sum: { amount: 10 }, _count: { _all: 1 } },
+    ]);
+    mockedPrisma.creator.findMany.mockResolvedValue([
+      { id: 1, username: "alice", displayName: null, avatarUrl: null },
+    ]);
+
+    await request(app).get("/api/creators/leaderboard?currency=EURC");
+    mockedPrisma.donation.groupBy.mockClear();
+    const res = await request(app).get("/api/creators/leaderboard?currency=EURC");
+
+    expect(res.status).toBe(200);
+    expect(mockedPrisma.donation.groupBy).not.toHaveBeenCalled();
   });
 });
