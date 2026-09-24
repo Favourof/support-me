@@ -1,10 +1,11 @@
 import { Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Donation, Prisma } from "@prisma/client";
 import prisma from "../prisma";
 import { asyncHandler } from "../middleware/asyncHandler";
 import { validate } from "../middleware/validate";
 import { createDonationSchema, listDonationsQuerySchema } from "../schemas/donations";
 import { BadRequestError, NotFoundError } from "../errors/AppError";
+import { notifyDonationConfirmation, notifyDonationReceived } from "../services/donationNotifications";
 
 const router = Router();
 
@@ -74,7 +75,13 @@ router.post(
       : undefined;
     const verified = !transactionHash;
 
-    const record = async (client: Prisma.TransactionClient) => {
+    // Tracks whether this request is the one that actually inserted the
+    // donation row, as opposed to an idempotent replay returning the
+    // original. Notifications must only fire once, on the real insert —
+    // not on every retry a client makes with the same Idempotency-Key.
+    let isNewDonation = false;
+
+    const record = async (client: Prisma.TransactionClient): Promise<Donation> => {
       await client.donationIdempotencyKey.deleteMany({ where: { expiresAt: { lt: new Date() } } });
       const existing = await client.donationIdempotencyKey.findUnique({
         where: { key: idempotencyKey },
@@ -123,10 +130,11 @@ router.post(
       await client.donationIdempotencyKey.create({
         data: { key: idempotencyKey, donationId: donation.id, expiresAt },
       });
+      isNewDonation = true;
       return donation;
     };
 
-    let donation;
+    let donation: Donation;
     try {
       donation = await prisma.$transaction(record);
     } catch (error) {
@@ -158,6 +166,31 @@ router.post(
         throw error;
       }
     }
+
+    // The donation is already committed; an email-provider outage must
+    // never make the request fail or look like the donation didn't go
+    // through. Each notification is independent (allSettled, not
+    // Promise.all) so the creator's email failing doesn't skip the
+    // supporter's, and each failure is logged individually.
+    if (isNewDonation) {
+      const [creatorResult, supporterResult] = await Promise.allSettled([
+        notifyDonationReceived(donation),
+        notifyDonationConfirmation(donation),
+      ]);
+      if (creatorResult.status === "rejected") {
+        console.error(
+          `Donation-received email failed for donation ${donation.id}:`,
+          (creatorResult.reason as Error).message
+        );
+      }
+      if (supporterResult.status === "rejected") {
+        console.error(
+          `Donation-confirmation email failed for donation ${donation.id}:`,
+          (supporterResult.reason as Error).message
+        );
+      }
+    }
+
     return res.status(201).json(donation);
   })
 );

@@ -6,13 +6,39 @@ import { validate } from "../middleware/validate";
 import {
   createCreatorParamsSchema,
   createCreatorSchema,
+  leaderboardQuerySchema,
   listCreatorsQuerySchema,
   updateCreatorSchema,
   usernameParamSchema,
 } from "../schemas/creators";
 import { ConflictError, NotFoundError, UnauthorizedError } from "../errors/AppError";
+import { TtlCache } from "../services/ttlCache";
 
 const router = Router();
+
+interface LeaderboardEntry {
+  rank: number;
+  total: number;
+  donationCount: number;
+}
+
+interface CreatorLeaderboardEntry extends LeaderboardEntry {
+  creator: { id: number; username: string; displayName: string | null; avatarUrl: string | null };
+}
+
+interface SupporterLeaderboardEntry extends LeaderboardEntry {
+  // Supporters are wallet addresses, not necessarily linked accounts —
+  // most donors never create a SupportMe account at all.
+  senderAddress: string;
+}
+
+// Aggregation scans every donation row for the chosen currency, which gets
+// more expensive as donation volume grows (#16's own stated concern); a
+// short TTL keeps the leaderboard responsive without needing a shared
+// cache/Redis for a single-instance API, while still being fresh within a
+// donation's-eye-view of "shortly after it happened". Exported so tests
+// can reset it between cases instead of sharing state across the file.
+export const leaderboardCache = new TtlCache<{ entries: LeaderboardEntry[]; total: number }>(30_000);
 
 // Discovery/search: browse creators by name or username, sorted by newest
 // or by donation count ("most supported" — a currency-agnostic proxy for
@@ -81,6 +107,77 @@ router.get(
     }
 
     return res.json(creator);
+  })
+);
+
+// Leaderboard (#16): top creators by total received, or top supporters by
+// total given, for one currency at a time. Must be registered before
+// "/:username" or Express would match "/leaderboard" as a username.
+router.get(
+  "/leaderboard",
+  validate({ query: leaderboardQuerySchema }),
+  asyncHandler(async (req, res) => {
+    const { type, currency, page, limit } = req.query as unknown as {
+      type: "creators" | "supporters";
+      currency: string;
+      page: number;
+      limit: number;
+    };
+
+    const cacheKey = `${type}:${currency}`;
+    const { entries: allRanked, total } = await leaderboardCache.getOrSet(cacheKey, async () => {
+      if (type === "creators") {
+        const grouped = await prisma.donation.groupBy({
+          by: ["creatorId"],
+          where: { currency },
+          _sum: { amount: true },
+          _count: { _all: true },
+          orderBy: { _sum: { amount: "desc" } },
+        });
+
+        const creators = await prisma.creator.findMany({
+          where: { id: { in: grouped.map((g) => g.creatorId) } },
+          select: { id: true, username: true, displayName: true, avatarUrl: true },
+        });
+        const creatorById = new Map(creators.map((c) => [c.id, c]));
+
+        const entries: CreatorLeaderboardEntry[] = grouped
+          .filter((g) => creatorById.has(g.creatorId))
+          .map((g, index) => ({
+            rank: index + 1,
+            total: g._sum.amount ?? 0,
+            donationCount: g._count._all,
+            creator: creatorById.get(g.creatorId)!,
+          }));
+
+        return { entries, total: entries.length };
+      }
+
+      const grouped = await prisma.donation.groupBy({
+        by: ["senderAddress"],
+        where: { currency },
+        _sum: { amount: true },
+        _count: { _all: true },
+        orderBy: { _sum: { amount: "desc" } },
+      });
+
+      const entries: SupporterLeaderboardEntry[] = grouped.map((g, index) => ({
+        rank: index + 1,
+        total: g._sum.amount ?? 0,
+        donationCount: g._count._all,
+        senderAddress: g.senderAddress,
+      }));
+
+      return { entries, total: entries.length };
+    });
+
+    const items = allRanked.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+    return res.json({
+      items,
+      currency,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
   })
 );
 

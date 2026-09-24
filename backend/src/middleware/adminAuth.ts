@@ -23,7 +23,7 @@ export const adminAuth = (req: AuthRequest, res: Response, next: NextFunction) =
     return next(new ForbiddenError('Admin access required'));
   }
 
-  if (!req.user || !admins.includes(req.user.walletAddress)) {
+  if (!req.user || !req.user.walletAddress || !admins.includes(req.user.walletAddress)) {
     return next(new ForbiddenError('Admin access required'));
   }
 

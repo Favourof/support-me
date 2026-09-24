@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { stellarAddress } from "./common";
+import { assetCode, stellarAddress } from "./common";
 
 export const usernameParamSchema = z.object({
   username: z.string().min(1, "username is required"),
@@ -10,6 +10,17 @@ export const listCreatorsQuerySchema = z.object({
   sort: z.enum(["newest", "most-supported"]).optional().default("newest"),
   page: z.coerce.number().int().positive().optional().default(1),
   limit: z.coerce.number().int().positive().max(50).optional().default(20),
+});
+
+export const leaderboardQuerySchema = z.object({
+  // "creators" ranks by total received; "supporters" ranks by total given.
+  type: z.enum(["creators", "supporters"]).optional().default("creators"),
+  // Donations across different currencies are never summed together (1 XLM
+  // and 1 USDC are not the same value), so a single currency is ranked at a
+  // time — defaulting to XLM, the platform's default asset.
+  currency: assetCode.optional().default("XLM"),
+  page: z.coerce.number().int().positive().optional().default(1),
+  limit: z.coerce.number().int().positive().max(100).optional().default(20),
 });
 
 const usernamePattern = /^[a-zA-Z0-9_-]{3,30}$/;
