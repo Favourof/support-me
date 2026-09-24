@@ -241,6 +241,25 @@ describe("PUT /api/creators/:username", () => {
       data: { bio: "hi there" },
     });
   });
+
+  // Issue #18: a creator opts into accepting USDT the same way they already
+  // do for XLM/USDC.
+  it("allows the owner to opt into accepting USDT", async () => {
+    mockedPrisma.creator.findUnique.mockResolvedValue({ id: 1, userId: 1, username: "bob" });
+    const updated = { id: 1, userId: 1, username: "bob", acceptsUsdt: true };
+    mockedPrisma.creator.update.mockResolvedValue(updated);
+
+    const res = await request(app)
+      .put("/api/creators/bob")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ acceptsUsdt: true });
+
+    expect(res.status).toBe(200);
+    expect(mockedPrisma.creator.update).toHaveBeenCalledWith({
+      where: { username: "bob" },
+      data: { acceptsUsdt: true },
+    });
+  });
 });
 
 describe("GET /api/creators/leaderboard (#16)", () => {

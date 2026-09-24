@@ -66,7 +66,8 @@ only reachable through the `donation` contract's cross-contract calls.
 - **Creator Profiles**: Public, shareable creator pages with unique usernames
 - **Multi-Wallet Integration**: Connect Freighter, xBull, Albedo, Rabet, or Lobstr via Stellar Wallets Kit
 - **On-Chain Contract Calls**: Donations are settled and recorded through a deployed Soroban contract
-- **Multi-Asset Tipping**: Supporters can tip in XLM or USDC — resolved client-side in [`frontend/lib/assets.js`](frontend/lib/assets.js); set `NEXT_PUBLIC_USDC_ISSUER` to enable the asset selector, otherwise the UI falls back to XLM-only
+- **Multi-Asset Tipping**: Supporters can tip in XLM, USDC, or USDT — resolved client-side in [`frontend/lib/assets.js`](frontend/lib/assets.js); set `NEXT_PUBLIC_USDC_ISSUER`/`NEXT_PUBLIC_USDT_ISSUER` to enable each asset in the selector, otherwise the UI falls back to XLM-only. A creator opts each asset in/out from `/settings` (`acceptsXlm`/`acceptsUsdc`/`acceptsUsdt`)
+- **Creator Goals**: A creator can track multiple simultaneous and/or recurring (weekly/monthly) donation goals, each denominated in a single asset. A donation applies in full to every active goal that matches its asset — not split between them. Amounts are tracked per-asset, never normalized to USD (no price oracle exists in this app). See [`backend/src/services/goalService.ts`](backend/src/services/goalService.ts), [`backend/src/services/goalResetScheduler.ts`](backend/src/services/goalResetScheduler.ts)
 - **Recurring Donations**: Supporters grant the `donation` contract a standard SAC allowance (`approve`) and call `subscribe` to record a schedule (weekly, monthly, or custom); a backend-held "executor" keypair then calls `charge_subscription` per interval via `transfer_from`. The executor never custodies funds — `transfer_from`'s `to` is pinned to the subscription's stored creator inside the contract, so a leaked executor key can at most accelerate/replay already-approved charges, not redirect them. Supporters manage/cancel subscriptions at `/app/subscriptions` (cancelling revokes the remaining allowance in the same transaction). See [`contracts/donation/src/lib.rs`](contracts/donation/src/lib.rs), [`backend/src/services/subscriptionExecutor.ts`](backend/src/services/subscriptionExecutor.ts). Requires `EXECUTOR_SECRET_KEY` (see [`backend/.env.example`](backend/.env.example)); the v2 contracts must be pointed at (see contract table above) — the live demo still runs on v1.
 - **Fiat Cash-Out (SEP-24)**: Creators can withdraw earnings through a Stellar anchor from `/settings` (SEP-10 sign-in → hosted KYC/bank form → on-chain transfer → live status), implemented in [`frontend/lib/anchor.js`](frontend/lib/anchor.js). Defaults to the SDF reference anchor (`testanchor.stellar.org`, asset `SRT`) on testnet; point `NEXT_PUBLIC_ANCHOR_*` at a real anchor to go live. This is a testnet-only demo by design — SEP-24 is not live on mainnet yet.
 - **Donation Tracking**: Backend-stored donation history with stats
@@ -427,10 +428,24 @@ id, walletAddress (unique), createdAt, updatedAt
 
 ### Creator
 ```
-id, userId (foreign key), username (unique), walletAddress, 
-displayName, bio, avatarUrl, socialLinks (JSON), donationGoal,
-createdAt, updatedAt
+id, userId (foreign key), username (unique), walletAddress,
+displayName, bio, avatarUrl, socialLinks (JSON),
+acceptsXlm (default: true), acceptsUsdc (default: true), acceptsUsdt (default: false),
+donationGoal (deprecated — see Goal below), createdAt, updatedAt
 ```
+
+### Goal
+```
+id, creatorId (foreign key), title, targetAmount (Float), currentAmount (Float, default: 0),
+currency (default: "XLM"), status (ACTIVE | COMPLETED | EXPIRED),
+recurring (default: false), recurrenceInterval (WEEKLY | MONTHLY),
+currentPeriodEnd, createdAt, updatedAt
+```
+A creator can have several goals active at once, each denominated in its own
+asset. `Creator.donationGoal` is deprecated in favor of this model — a
+migration copies any existing single goal into a `Goal` row (see
+[`backend/prisma/migrations`](backend/prisma/migrations)) rather than
+dropping it.
 
 ### Donation
 ```
@@ -521,9 +536,9 @@ See `CONTRIBUTING.md` for guidelines on making changes, opening issues, and subm
 - [ ] Leaderboards (top creators, top supporters)
 - [ ] QR code generation for profiles
 - [ ] Email notifications for donations
-- [ ] Additional asset support (USDT, etc.)
+- [x] Additional asset support (USDT, etc.)
 - [ ] Embeddable donation widgets
-- [ ] Creator goals and progress tracking
+- [x] Creator goals and progress tracking
 
 ## License
 

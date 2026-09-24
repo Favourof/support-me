@@ -6,6 +6,7 @@ import { validate } from "../middleware/validate";
 import { createDonationSchema, listDonationsQuerySchema } from "../schemas/donations";
 import { BadRequestError, NotFoundError } from "../errors/AppError";
 import { notifyDonationConfirmation, notifyDonationReceived } from "../services/donationNotifications";
+import { applyDonationToGoals } from "../services/goalService";
 
 const router = Router();
 
@@ -130,6 +131,10 @@ router.post(
       await client.donationIdempotencyKey.create({
         data: { key: idempotencyKey, donationId: donation.id, expiresAt },
       });
+      // Only reached for a genuinely new donation (the early returns above,
+      // for a repeated idempotency key, skip this) — otherwise a retried
+      // request would double-count the same donation against goal progress.
+      await applyDonationToGoals(client, creator.id, currency, amount);
       isNewDonation = true;
       return donation;
     };

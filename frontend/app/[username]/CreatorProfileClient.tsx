@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, use } from 'react';
+import { useState, useEffect, useMemo, useCallback, use } from 'react';
 import Image from 'next/image';
 import * as StellarSdk from '@stellar/stellar-sdk';
 import { notify } from '@/lib/notify';
@@ -49,26 +49,25 @@ interface Creator {
   socialLinks: Record<string, string> | null;
   acceptsXlm: boolean;
   acceptsUsdc: boolean;
+  acceptsUsdt: boolean;
   donationGoal: number | null;
-  donations: Donation[];
 }
 
-interface Donation {
-  id: number | string;
-  senderAddress: string;
-  amount: number;
+interface Goal {
+  id: number;
+  title: string | null;
+  targetAmount: number;
+  currentAmount: number;
   currency: string;
-  message: string;
-  createdAt: string;
-  transactionHash?: string;
-  eventId?: string;
+  status: 'ACTIVE' | 'COMPLETED' | 'EXPIRED';
+  recurring: boolean;
 }
 
 export default function CreatorProfileClient({ params }: { params: Promise<{ username: string }> }) {
   const { username } = use(params);
   const { token, loginWithWallet } = useAuth();
   const [creator, setCreator] = useState<Creator | null>(null);
-  const [donations, setDonations] = useState<Donation[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
@@ -92,15 +91,38 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
   const presets = ['1', '5', '10', '20'];
 
   // Only offer assets the creator actually accepts, intersected with what this
-  // deployment supports (USDC only appears when an issuer is configured).
+  // deployment supports (USDC/USDT only appear when their issuer is configured).
   const assetCodes = useMemo(() => {
     if (!creator) return [];
     return availableAssetCodes().filter((code) => {
       if (code === 'XLM') return creator.acceptsXlm;
       if (code === 'USDC') return creator.acceptsUsdc;
+      if (code === 'USDT') return creator.acceptsUsdt;
       return true;
     });
   }, [creator]);
+
+  // Goal progress lives entirely server-side (Goal.currentAmount, updated by
+  // the backend as donations come in — see goalService.ts) rather than being
+  // derived here by summing donations, since a single donation can now count
+  // toward several simultaneously-active goals. Only ACTIVE goals are shown;
+  // a COMPLETED (non-recurring, target reached) or EXPIRED goal drops off the
+  // profile's goal bar list.
+  // useCallback (keyed only on username, not on every render) so the SSE
+  // effect below can safely list it as a dependency without resubscribing on
+  // every render.
+  const fetchGoals = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `${API_URL}/api/goals/${encodeURIComponent(username)}?status=ACTIVE`
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      setGoals(Array.isArray(data) ? data : data.items || []);
+    } catch {
+      // Non-fatal: the profile still renders without goal bars.
+    }
+  }, [username]);
 
   useEffect(() => {
     const fetchCreator = async () => {
@@ -109,13 +131,7 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
         if (!res.ok) throw new Error('Creator not found');
         const data: Creator = await res.json();
         setCreator(data);
-        const donationsRes = await fetch(
-          `${API_URL}/api/donations?creatorUsername=${encodeURIComponent(username)}&page=1&limit=20`
-        );
-        if (donationsRes.ok) {
-          const donationsData = await donationsRes.json();
-          setDonations(Array.isArray(donationsData) ? donationsData : donationsData.items || []);
-        }
+        await fetchGoals();
       } catch {
         setNotFound(true);
       } finally {
@@ -123,7 +139,7 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
       }
     };
     fetchCreator();
-  }, [username]);
+  }, [username, fetchGoals]);
 
   // Default the selected asset to the first one the creator accepts, once the
   // profile loads.
@@ -141,16 +157,7 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
     const source = new EventSource(`${API_URL}/api/events`);
 
     const handleDonation = (event: MessageEvent) => {
-      let payload: {
-        donor: string;
-        creator: string;
-        amount: string;
-        memo: string;
-        timestamp: number;
-        txHash: string;
-        eventId?: string;
-        currency?: string;
-      };
+      let payload: { creator: string };
       try {
         payload = JSON.parse(event.data);
       } catch {
@@ -159,21 +166,9 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
 
       if (payload.creator !== creator.walletAddress) return;
 
-      setDonations((prev) => {
-        if (!payload.eventId && prev.some((d) => d.transactionHash === payload.txHash)) return prev;
-        if (payload.eventId && prev.some((d) => d.eventId === payload.eventId)) return prev;
-        const newDonation: Donation = {
-          id: payload.eventId || payload.txHash,
-          senderAddress: payload.donor,
-          amount: Number(payload.amount) / 1e7,
-          currency: payload.currency || 'XLM',
-          message: payload.memo,
-          createdAt: new Date(payload.timestamp * 1000).toISOString(),
-          transactionHash: payload.txHash,
-          eventId: payload.eventId,
-        };
-        return [newDonation, ...prev];
-      });
+      // The SSE event only carries the on-chain payment, not which goal(s) it
+      // was applied to server-side — refetch rather than guess at the split.
+      void fetchGoals();
     };
 
     source.addEventListener('donation', handleDonation);
@@ -182,7 +177,7 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
       source.removeEventListener('donation', handleDonation);
       source.close();
     };
-  }, [creator?.walletAddress]);
+  }, [creator?.walletAddress, fetchGoals]);
 
   // Read the connected wallet's balance for whichever asset is selected. Falls
   // back to null when the wallet holds no trustline/balance for it.
@@ -268,6 +263,9 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
       });
 
       setBalance(await loadAssetBalance(userAddress, assetCode));
+      // The record call (if it succeeded) already applied this donation to
+      // any matching active goals server-side — pick up the new totals.
+      if (recordRes.ok) await fetchGoals();
 
       const txLink = (
         <a
@@ -432,17 +430,6 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
   const socialLinks = creator.socialLinks || {};
   const socialEntries = Object.entries(socialLinks).filter(([, url]) => url);
 
-  const goal = creator.donationGoal;
-  // The goal isn't tied to a currency in the schema, so it's assumed to be
-  // denominated in whichever asset the creator actually accepts — XLM if
-  // they take both, otherwise USDC. Without this, a USDC-only creator's goal
-  // bar would sum an asset they never receive and stay stuck at 0%.
-  const goalCurrency = creator.acceptsXlm ? 'XLM' : 'USDC';
-  const goalReceived = donations
-    .filter((d) => d.currency === goalCurrency)
-    .reduce((sum, d) => sum + d.amount, 0);
-  const goalPct = goal ? Math.min(100, (goalReceived / goal) * 100) : 0;
-
   const displayName = creator.displayName || creator.username;
 
   return (
@@ -493,21 +480,42 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
             </div>
           )}
 
-          {goal && (
-            <div className="mt-6 pt-6 border-t-2 border-ink text-left">
-              <div className="flex justify-between text-sm font-bold text-ink mb-2">
-                <span>{goalReceived.toFixed(0)} / {goal} {goalCurrency}</span>
-                <span>{goalPct.toFixed(0)}%</span>
-              </div>
-              <div
-                className="h-3 border-2 border-ink rounded-full overflow-hidden bg-accent-bg"
-                role="progressbar"
-                aria-valuenow={Math.round(goalPct)}
-                aria-valuemin={0}
-                aria-valuemax={100}
-              >
-                <div className="h-full bg-brand-lime" style={{ width: `${goalPct}%` }} />
-              </div>
+          {goals.length > 0 && (
+            <div className="mt-6 pt-6 border-t-2 border-ink text-left space-y-4">
+              {goals.map((g) => {
+                // Progress is whatever the backend has already computed for
+                // this goal (Goal.currentAmount) — never re-derived here by
+                // summing donations, since a donation can count toward
+                // several active goals at once (see goalService.ts).
+                const pct = Math.min(100, (g.currentAmount / g.targetAmount) * 100);
+                return (
+                  <div key={g.id}>
+                    <div className="flex justify-between text-sm font-bold text-ink mb-2 gap-2">
+                      <span className="truncate">
+                        {g.title || 'Goal'}
+                        {g.recurring && (
+                          <span className="ml-1.5 text-[10px] font-extrabold uppercase tracking-wide text-ink/60 align-middle">
+                            Recurring
+                          </span>
+                        )}
+                      </span>
+                      <span className="shrink-0">
+                        {g.currentAmount.toFixed(0)} / {g.targetAmount.toFixed(0)} {g.currency}
+                      </span>
+                    </div>
+                    <div
+                      className="h-3 border-2 border-ink rounded-full overflow-hidden bg-accent-bg"
+                      role="progressbar"
+                      aria-valuenow={Math.round(pct)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={g.title || `${g.currency} goal`}
+                    >
+                      <div className="h-full bg-brand-lime" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

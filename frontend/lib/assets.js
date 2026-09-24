@@ -2,17 +2,19 @@ import * as StellarSdk from '@stellar/stellar-sdk';
 
 const NETWORK_PASSPHRASE = StellarSdk.Networks.TESTNET;
 
-// USDC is only available when its issuer is configured via env. On testnet
-// this is typically the SDF-issued test USDC
-// (GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA).
+// USDC/USDT are only available when their issuer is configured via env. On
+// testnet these are typically the SDF-issued test USDC
+// (GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA) and a similarly
+// issued test USDT.
 const USDC_ISSUER = process.env.NEXT_PUBLIC_USDC_ISSUER;
+const USDT_ISSUER = process.env.NEXT_PUBLIC_USDT_ISSUER;
 
 /**
  * Supported donation assets. Each entry knows how to resolve its own Stellar
  * Asset Contract (SAC) id — the address the `donate` contract's generic
- * `token` parameter expects. XLM is always available; USDC only appears when
- * an issuer is configured, so the UI can hide it cleanly on deployments that
- * haven't set it up yet.
+ * `token` parameter expects. XLM is always available; USDC/USDT only appear
+ * when their issuer is configured, so the UI can hide them cleanly on
+ * deployments that haven't set them up yet.
  */
 export const ASSETS = {
   XLM: {
@@ -31,6 +33,18 @@ export const ASSETS = {
           asset: () => new StellarSdk.Asset('USDC', USDC_ISSUER),
           balanceMatcher: (b) =>
             b.asset_code === 'USDC' && b.asset_issuer === USDC_ISSUER,
+        },
+      }
+    : {}),
+  ...(USDT_ISSUER
+    ? {
+        USDT: {
+          code: 'USDT',
+          label: 'USDT',
+          issuer: USDT_ISSUER,
+          asset: () => new StellarSdk.Asset('USDT', USDT_ISSUER),
+          balanceMatcher: (b) =>
+            b.asset_code === 'USDT' && b.asset_issuer === USDT_ISSUER,
         },
       }
     : {}),
