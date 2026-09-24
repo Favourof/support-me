@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { NextFunction, Request, Response } from "express";
+import { log } from "../lib/logger";
 
 declare global {
   namespace Express {
@@ -39,18 +40,13 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
   res.on("finish", () => {
     const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
 
-    process.stdout.write(
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: levelForStatus(res.statusCode),
-        message: "request completed",
-        requestId: req.requestId,
-        method: req.method,
-        path: req.path,
-        status: res.statusCode,
-        durationMs: Math.round(durationMs * 10) / 10,
-      }) + "\n"
-    );
+    log(levelForStatus(res.statusCode), "request completed", {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      durationMs: Math.round(durationMs * 10) / 10,
+    });
   });
 
   next();

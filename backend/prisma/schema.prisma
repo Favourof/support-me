@@ -178,3 +178,34 @@ model Subscription {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 }
+
+enum EmailEventType {
+  SENT
+  DELIVERED
+  BOUNCED
+  COMPLAINED
+  FAILED
+}
+
+// One row per email send attempt, plus one row per delivery-status webhook
+// (delivered/bounced/complained) Resend sends back for it. Keyed by
+// recipient address rather than a User relation: webhook payloads only ever
+// give us the address, and a bounce needs to be actionable even if the
+// sending code path didn't have a User row on hand.
+model EmailEvent {
+  id                Int            @id @default(autoincrement())
+  recipient         String
+  subject           String
+  type              EmailEventType
+  // Resend's message id, so a later webhook (delivered/bounced/complained)
+  // can be linked back to the SENT row for the same send. Null for send
+  // attempts that failed before Resend returned an id.
+  providerMessageId String?
+  // Populated on FAILED/BOUNCED rows so the failure is diagnosable from the
+  // row alone, without cross-referencing stdout logs.
+  errorDetail       String?
+  createdAt         DateTime       @default(now())
+
+  @@index([recipient, createdAt])
+  @@index([providerMessageId])
+}

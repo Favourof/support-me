@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from "express";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { AppError } from "../errors/AppError";
+import { log } from "../lib/logger";
 
 interface BodyParserError {
   type: string;
@@ -88,16 +89,11 @@ export function errorHandler(
     }
   }
 
-  process.stdout.write(
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level: "error",
-      message: "unhandled error",
-      requestId: req.requestId,
-      method: req.method,
-      path: req.path,
-      error: safeErrorMessage(err),
-    }) + "\n"
-  );
+  log("error", "unhandled error", {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.path,
+    error: safeErrorMessage(err),
+  });
   return res.status(500).json(withRequestId(req, { error: "Internal server error", code: "INTERNAL_ERROR" }));
 }
