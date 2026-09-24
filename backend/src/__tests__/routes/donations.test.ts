@@ -4,6 +4,9 @@ jest.mock("../../prisma", () => ({
     creator: {
       findUnique: jest.fn(),
     },
+    user: {
+      findUnique: jest.fn(),
+    },
     donation: {
       findMany: jest.fn(),
       count: jest.fn(),
@@ -19,12 +22,18 @@ jest.mock("../../prisma", () => ({
   },
 }));
 
+jest.mock("../../services/email/mailer", () => ({
+  sendEmail: jest.fn().mockResolvedValue(undefined),
+}));
+
 import request from "supertest";
 import app from "../../app";
 import prisma from "../../prisma";
+import { sendEmail } from "../../services/email/mailer";
 
 const mockedPrisma = prisma as unknown as {
   creator: { findUnique: jest.Mock };
+  user: { findUnique: jest.Mock };
   donation: { findMany: jest.Mock; count: jest.Mock; create: jest.Mock };
   donationIdempotencyKey: {
     deleteMany: jest.Mock;
@@ -35,12 +44,21 @@ const mockedPrisma = prisma as unknown as {
   $transaction: jest.Mock;
 };
 
+const mockedSendEmail = sendEmail as jest.MockedFunction<typeof sendEmail>;
+
 beforeEach(() => {
+  jest.clearAllMocks();
   mockedPrisma.$transaction.mockImplementation((callback: (client: typeof mockedPrisma) => unknown) =>
     callback(mockedPrisma)
   );
   mockedPrisma.donation.count.mockResolvedValue(0);
   mockedPrisma.donationIdempotencyKey.findUnique.mockResolvedValue(null);
+  // Default: the second creator.findUnique call inside notifyDonationReceived
+  // (keyed by id, with the user relation included) finds nothing, and the
+  // supporter's wallet address is unknown — both notifications degrade to
+  // "no recipient" rather than throwing, unless a test overrides this.
+  mockedPrisma.user.findUnique.mockResolvedValue(null);
+  mockedSendEmail.mockResolvedValue(undefined);
 });
 
 describe("GET /api/donations", () => {
@@ -164,5 +182,119 @@ describe("POST /api/donations", () => {
     expect(res.status).toBe(201);
     expect(res.body).toEqual(original);
     expect(mockedPrisma.donation.create).not.toHaveBeenCalled();
+  });
+
+  describe("donation notifications (#17)", () => {
+    const SENDER_ADDRESS = "GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW";
+    const created = {
+      id: 1,
+      creatorId: 7,
+      senderAddress: SENDER_ADDRESS,
+      amount: 10,
+      currency: "XLM",
+      message: "nice work",
+      transactionHash: null,
+    };
+
+    function mockCreatorLookups(withEmail: boolean) {
+      // creator.findUnique is called twice with different `where` clauses:
+      // once by username inside the transaction, once by id (with the user
+      // relation) inside notifyDonationReceived. Branch on the shape of
+      // `where` to answer each correctly.
+      mockedPrisma.creator.findUnique.mockImplementation(({ where }: { where: Record<string, unknown> }) => {
+        if ("username" in where) return Promise.resolve({ id: 7, username: "bob" });
+        return Promise.resolve({
+          id: 7,
+          username: "bob",
+          displayName: "Bob",
+          user: withEmail ? { email: "bob@example.com" } : { email: null },
+        });
+      });
+    }
+
+    it("emails the creator when they have an email on file", async () => {
+      mockCreatorLookups(true);
+      mockedPrisma.donation.create.mockResolvedValue(created);
+
+      const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-1").send({
+        creatorUsername: "bob",
+        senderAddress: SENDER_ADDRESS,
+        amount: 10,
+        message: "nice work",
+      });
+
+      expect(res.status).toBe(201);
+      expect(mockedSendEmail).toHaveBeenCalledWith(
+        expect.objectContaining({ to: "bob@example.com", subject: expect.stringContaining("donation") })
+      );
+    });
+
+    it("does not email the creator when they have no email on file, and does not fail the request", async () => {
+      mockCreatorLookups(false);
+      mockedPrisma.donation.create.mockResolvedValue(created);
+
+      const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-2").send({
+        creatorUsername: "bob",
+        senderAddress: SENDER_ADDRESS,
+        amount: 10,
+      });
+
+      expect(res.status).toBe(201);
+      expect(mockedSendEmail).not.toHaveBeenCalled();
+    });
+
+    it("emails the supporter a confirmation when their wallet address matches a known account with an email", async () => {
+      mockCreatorLookups(false);
+      mockedPrisma.donation.create.mockResolvedValue(created);
+      mockedPrisma.user.findUnique.mockResolvedValue({
+        id: 3,
+        walletAddress: SENDER_ADDRESS,
+        email: "supporter@example.com",
+      });
+
+      const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-3").send({
+        creatorUsername: "bob",
+        senderAddress: SENDER_ADDRESS,
+        amount: 10,
+      });
+
+      expect(res.status).toBe(201);
+      expect(mockedSendEmail).toHaveBeenCalledWith(
+        expect.objectContaining({ to: "supporter@example.com" })
+      );
+    });
+
+    it("does not send any notification when replaying an existing idempotency key (no new donation)", async () => {
+      const original = { id: 1, creatorId: 7, amount: 10 };
+      mockedPrisma.donationIdempotencyKey.findUnique.mockResolvedValue({
+        key: "notify-4",
+        expiresAt: new Date(Date.now() + 60_000),
+        donation: original,
+      });
+
+      const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-4").send({
+        creatorUsername: "bob",
+        senderAddress: SENDER_ADDRESS,
+        amount: 99,
+      });
+
+      expect(res.status).toBe(201);
+      expect(mockedSendEmail).not.toHaveBeenCalled();
+    });
+
+    it("still returns 201 with the created donation when email delivery throws", async () => {
+      mockCreatorLookups(true);
+      mockedPrisma.donation.create.mockResolvedValue(created);
+      mockedSendEmail.mockRejectedValue(new Error("email provider down"));
+
+      const res = await request(app).post("/api/donations").set("Idempotency-Key", "notify-5").send({
+        creatorUsername: "bob",
+        senderAddress: SENDER_ADDRESS,
+        amount: 10,
+      });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual(created);
+    });
   });
 });
