@@ -93,12 +93,24 @@ model Creator {
   socialLinks   Json?
   acceptsXlm    Boolean        @default(true)
   acceptsUsdc   Boolean        @default(true)
+  // Mirrors acceptsUsdc: defaults false (unlike XLM/USDC) since USDT support
+  // is new — an existing creator shouldn't start accepting an asset they
+  // never opted into just because this column appeared. See migration
+  // 20260924030100_add_creator_accepts_usdt.
+  acceptsUsdt   Boolean        @default(false)
+  // Deprecated: superseded by the Goal model below, which supports multiple
+  // and/or recurring goals (see migration
+  // 20260924030000_add_goals_and_migrate_donation_goal). Kept nullable
+  // rather than dropped so existing rows aren't destroyed by the schema
+  // change alone — the migration copies each non-null value into a new Goal
+  // row before the column stops being read by the API.
   donationGoal  Int?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   donations     Donation[]
   withdrawals   Withdrawal[]
   subscriptions Subscription[]
+  goals         Goal[]
 
   @@index([walletAddress])
 }
@@ -151,6 +163,55 @@ model Withdrawal {
   // A given anchor transaction maps to exactly one withdrawal record. Lets the
   // POST handler be idempotent when the completion path fires more than once.
   @@unique([creatorId, anchorTxId])
+}
+
+// A creator can track more than one goal at once (e.g. a one-off "New mic"
+// target alongside a recurring "Monthly support" target). Each goal is
+// denominated in a single asset (`currency`) and tracks its own progress
+// server-side in `currentAmount` — donations increment it directly (see
+// services/goalService.ts) rather than the frontend deriving progress by
+// summing donations on every page load, which stopped being workable once a
+// single donation can count toward several simultaneously-active goals.
+model Goal {
+  id            Int                 @id @default(autoincrement())
+  creator       Creator             @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  creatorId     Int
+  // Short label so a creator with multiple goals can tell them apart in the
+  // UI (e.g. "New microphone", "Monthly support"). Optional: a goal migrated
+  // from the old single `donationGoal` field has none.
+  title         String?
+  targetAmount  Float
+  currentAmount Float               @default(0)
+  // Asset this goal is denominated in ("XLM", "USDC", "USDT", ...). Amounts
+  // are tracked per-asset, never normalized to USD — see the reasoning in
+  // services/goalService.ts.
+  currency      String              @default("XLM")
+  status        GoalStatus          @default(ACTIVE)
+  recurring     Boolean             @default(false)
+  // Only meaningful when `recurring` is true. Limited to the two intervals
+  // the issue actually asks for ("e.g. monthly") rather than a general cron
+  // expression, which nothing here needs yet.
+  recurrenceInterval RecurrenceInterval?
+  // Only meaningful when `recurring` is true: the instant the current
+  // progress period ends and `currentAmount` resets to 0. Set to
+  // `now() + interval` whenever a recurring goal is created or reset.
+  currentPeriodEnd   DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([creatorId])
+  @@index([recurring, currentPeriodEnd])
+}
+
+enum GoalStatus {
+  ACTIVE
+  COMPLETED
+  EXPIRED
+}
+
+enum RecurrenceInterval {
+  WEEKLY
+  MONTHLY
 }
 
 model Subscription {

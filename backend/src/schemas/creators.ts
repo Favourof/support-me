@@ -48,6 +48,11 @@ export const updateCreatorSchema = z.object({
   socialLinks: z.record(z.string().max(32), z.string().max(300)).optional(),
   acceptsXlm: z.boolean().optional(),
   acceptsUsdc: z.boolean().optional(),
-  // null clears a previously-set goal; a positive integer sets it.
+  acceptsUsdt: z.boolean().optional(),
+  // Deprecated alongside Creator.donationGoal (see prisma/schema.prisma) —
+  // still accepted here so an already-deployed frontend that hasn't picked
+  // up the multi-goal UI doesn't break, but new goals should go through
+  // POST /api/goals/:username instead. null clears a previously-set goal; a
+  // positive integer sets it.
   donationGoal: z.number().int().positive().nullable().optional(),
 });

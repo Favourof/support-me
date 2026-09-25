@@ -14,6 +14,7 @@ import {
 } from "./subscriptionNotifications";
 import { withSorobanRpcServer } from "./sorobanRpc";
 import { executorHealth } from "./executorHealth";
+import { applyDonationToGoals } from "./goalService";
 
 const NETWORK_PASSPHRASE = Networks.TESTNET;
 
@@ -132,8 +133,8 @@ export class SubscriptionExecutor {
 
     const nextChargeAt = new Date(Date.now() + subscription.intervalSecs * 1000);
     const onChainEventId = `${hash}:0:0`;
-    await prisma.$transaction([
-      prisma.donation.upsert({
+    await prisma.$transaction(async (client) => {
+      await client.donation.upsert({
         where: {
           transactionHash_operationIndex_eventIndex: {
             transactionHash: hash,
@@ -154,8 +155,8 @@ export class SubscriptionExecutor {
           eventIndex: 0,
           verified: true,
         },
-      }),
-      prisma.subscription.update({
+      });
+      await client.subscription.update({
         where: { id: subscription.id },
         data: {
           nextChargeAt,
@@ -164,8 +165,11 @@ export class SubscriptionExecutor {
           lastError: null,
           failureNotifiedAt: null,
         },
-      }),
-    ]);
+      });
+      // A recurring donation applies to goal progress the same way a
+      // one-off donation does (see goalService.ts's applyDonationToGoals).
+      await applyDonationToGoals(client, subscription.creatorId, subscription.token, subscription.amount);
+    });
     executorHealth.recordCharge(subscription.id, "success");
 
     // The charge already settled on-chain and is recorded; a mail outage
