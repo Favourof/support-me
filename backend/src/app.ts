@@ -9,6 +9,7 @@ import eventsRouter from "./routes/events";
 import adminRouter from "./routes/admin";
 import activityRouter from "./routes/activity";
 import accountRouter from "./routes/account";
+import emailWebhooksRouter from "./routes/emailWebhooks";
 import { errorHandler } from "./middleware/errorHandler";
 import { requestLogger } from "./middleware/requestLogger";
 import { checkSorobanRpc } from "./services/sorobanHealth";
@@ -18,6 +19,13 @@ const app = express();
 
 app.use(requestLogger);
 app.use(cors());
+
+// Mounted with express.raw() ahead of the global express.json() below: Svix
+// signature verification (see routes/emailWebhooks.ts) needs the exact raw
+// request body, not one that's already been parsed and would have to be
+// re-serialized (and could byte-for-byte differ from what Resend signed).
+app.use("/api/webhooks/email", express.raw({ type: "application/json" }), emailWebhooksRouter);
+
 app.use(express.json());
 
 app.get("/health", async (req, res) => {
