@@ -8,6 +8,11 @@ jest.mock("../../services/sorobanHealth", () => ({
 
 import request from "supertest";
 import app from "../../app";
+import { executorHealth } from "../../services/executorHealth";
+
+beforeEach(() => {
+  executorHealth.reset();
+});
 
 describe("GET /health", () => {
   it("returns 200 with an ok status", async () => {
@@ -28,12 +33,81 @@ describe("GET /health", () => {
     expect(res.body.status).toBe("degraded");
     expect(res.body.dependencies.sorobanRpc.status).toBe("down");
   });
+
+  it("includes the subscription executor's run status and recent charge outcomes", async () => {
+    executorHealth.markEnabled(60_000);
+    executorHealth.runFinished(true);
+    executorHealth.recordCharge(7, "success");
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    const executor = res.body.dependencies.subscriptionExecutor;
+    expect(executor.status).toBe("ok");
+    expect(typeof executor.lastRunAt).toBe("string");
+    expect(typeof executor.lastSuccessAt).toBe("string");
+    expect(executor.recentCharges.successCount).toBe(1);
+    expect(executor.recentCharges.failureCount).toBe(0);
+  });
+
+  it("reports an unhealthy overall status when the executor has stalled", async () => {
+    executorHealth.markEnabled(60_000);
+    executorHealth.runFinished(true, undefined, Date.now() - 5 * 60_000);
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("unhealthy");
+    expect(res.body.dependencies.subscriptionExecutor.status).toBe("unhealthy");
+  });
+});
+
+describe("GET /health/executor", () => {
+  it("returns the executor report with a healthy status after a successful run", async () => {
+    executorHealth.markEnabled(60_000);
+    executorHealth.runFinished(true);
+    executorHealth.recordCharge(3, "failure", "insufficient balance");
+
+    const res = await request(app).get("/health/executor");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(res.body.subscriptionExecutor.status).toBe("ok");
+    expect(res.body.subscriptionExecutor.recentCharges.failureCount).toBe(1);
+    expect(res.body.subscriptionExecutor.recentCharges.outcomes[0].error).toBe(
+      "insufficient balance"
+    );
+  });
+
+  it("returns unhealthy when the executor has not run within its expected interval", async () => {
+    executorHealth.markEnabled(60_000);
+    executorHealth.runFinished(true, undefined, Date.now() - 10 * 60_000);
+
+    const res = await request(app).get("/health/executor");
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("unhealthy");
+    expect(res.body.subscriptionExecutor.msSinceLastRun).toBeGreaterThanOrEqual(10 * 60_000);
+  });
+
+  it("reports disabled when the executor was never started", async () => {
+    const res = await request(app).get("/health/executor");
+
+    expect(res.status).toBe(200);
+    expect(res.body.subscriptionExecutor.status).toBe("disabled");
+    expect(res.body.status).toBe("ok");
+  });
 });
 
 describe("unknown routes", () => {
   it("returns a structured 404", async () => {
     const res = await request(app).get("/api/does-not-exist");
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: "Not Found", code: "NOT_FOUND" });
+
+    expect(res.body).toEqual(
+      expect.objectContaining({ error: "Not Found", code: "NOT_FOUND" })
+    );
+    expect(typeof res.body.requestId).toBe("string");
   });
 });

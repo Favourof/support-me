@@ -20,6 +20,7 @@ const REGISTRY_KEY: Symbol = symbol_short!("registry");
 const SUBSCRIPTIONS_KEY: Symbol = symbol_short!("subs");
 const SUB_COUNTER: Symbol = symbol_short!("sub_ctr");
 const EXECUTOR_KEY: Symbol = symbol_short!("executor");
+pub const MAX_MEMO_LENGTH: u32 = 140;
 
 /// Emitted whenever a donation is settled on-chain. `donor` and `creator`
 /// are indexed as topics so downstream systems (e.g. the backend's event
@@ -35,6 +36,9 @@ pub struct DonatedEvent {
     pub amount: i128,
     pub memo: String,
     pub timestamp: u64,
+    /// SAC address used for the transfer, so indexers do not have to guess
+    /// which asset a DonatedEvent represents.
+    pub token: Address,
 }
 
 /// Emitted when a supporter starts a recurring donation.
@@ -105,6 +109,10 @@ impl DonationContract {
     ) -> DonationRecord {
         donor.require_auth();
         assert!(amount > 0, "Donation amount must be positive");
+        assert!(
+            memo.len() <= MAX_MEMO_LENGTH,
+            "Donation memo exceeds maximum length"
+        );
 
         // Move the funds from donor to creator via the token contract (e.g. native XLM SAC)
         let token_client = token::Client::new(&env, &token);
@@ -148,6 +156,7 @@ impl DonationContract {
             amount,
             memo,
             timestamp: env.ledger().timestamp(),
+            token,
         }
         .publish(&env);
 
@@ -295,6 +304,7 @@ impl DonationContract {
             amount: subscription.amount,
             memo,
             timestamp: now,
+            token: subscription.token,
         }
         .publish(&env);
 
@@ -430,6 +440,8 @@ mod tests {
         assert_eq!(donation.amount, 1000);
         assert_eq!(donation.donor, donor);
         assert_eq!(donation.creator, creator);
+        assert_eq!(donation.memo, String::from_bytes(&env, b"Great work!"));
+        assert_eq!(donation_client.get_donation(&0).unwrap().memo, donation.memo);
 
         // Verify the transfer actually happened
         let token_client = token::Client::new(&env, &token_address);
@@ -511,6 +523,28 @@ mod tests {
             &token_address,
             &1000,
             &String::from_bytes(&env, b"too much"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Donation memo exceeds maximum length")]
+    fn test_donate_rejects_oversized_memo() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, donation_client, _registry_client) = setup(&env);
+
+        let donor = Address::generate(&env);
+        let creator = Address::generate(&env);
+        let token_address = create_token_contract(&env, &admin);
+        StellarAssetClient::new(&env, &token_address).mint(&donor, &1_000);
+        let oversized_memo = [b'x'; MAX_MEMO_LENGTH as usize + 1];
+
+        donation_client.donate(
+            &donor,
+            &creator,
+            &token_address,
+            &100,
+            &String::from_bytes(&env, &oversized_memo),
         );
     }
 

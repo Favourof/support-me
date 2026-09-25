@@ -1,20 +1,18 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { AppNav } from '@/components/AppNav';
 import { Skeleton } from '@/components/Skeleton';
 import { API_URL } from '@/lib/api';
+import { isAdminWallet } from '@/lib/admin';
+import Link from 'next/link';
 
 // Client-side allowlist check — same env var as the backend, but NEXT_PUBLIC_ so
 // it ships to the browser. This is purely a UX gate: the real enforcement is the
 // backend's adminAuth middleware. A blank var means "show not-authorised" in the
 // UI (fail-closed matches the backend behaviour).
-const ADMIN_WALLETS = (process.env.NEXT_PUBLIC_ADMIN_WALLETS || '')
-  .split(',')
-  .map((w) => w.trim())
-  .filter(Boolean);
 
 type EarningsByCurrency = Record<string, number>;
 
@@ -57,18 +55,22 @@ export default function AdminPage() {
   const [error, setError] = useState('');
   const [earningsCurrency, setEarningsCurrency] = useState<string | null>(null);
 
-  const isAdmin = !!user && ADMIN_WALLETS.includes(user.walletAddress);
+  const isAdmin = isAdminWallet(user?.walletAddress);
 
   // Currencies the platform has actually earned in, in a stable order (XLM, USDC
   // first, then anything else). Drives the total-earnings toggle.
-  const currencies = data
-    ? Object.keys(data.earningsByCurrency).sort((a, b) => {
-        const order = ['XLM', 'USDC'];
-        const ia = order.indexOf(a);
-        const ib = order.indexOf(b);
-        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-      })
-    : [];
+  const currencies = useMemo(
+    () =>
+      data
+        ? Object.keys(data.earningsByCurrency).sort((a, b) => {
+            const order = ['XLM', 'USDC'];
+            const ia = order.indexOf(a);
+            const ib = order.indexOf(b);
+            return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+          })
+        : [],
+    [data]
+  );
 
   // Default the toggle to the first available currency once data loads.
   useEffect(() => {
@@ -149,7 +151,12 @@ export default function AdminPage() {
       <div className="min-h-screen bg-background">
         <AppNav />
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-          <h1 className="text-4xl font-extrabold text-ink tracking-tight mb-8">Admin</h1>
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-8">
+            <h1 className="text-4xl font-extrabold text-ink tracking-tight">Admin</h1>
+            <Link href="/admin/audit" className="btn-brutal btn-brutal-primary">
+              View audit log
+            </Link>
+          </div>
 
           {error && (
             <div className="card-brutal bg-brand-pink p-4 mb-6 text-ink font-bold">{error}</div>

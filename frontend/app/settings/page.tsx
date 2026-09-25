@@ -13,6 +13,8 @@ import { Skeleton } from '@/components/Skeleton';
 import { SOCIAL_PLATFORMS, normalizeSocialValue } from '@/lib/socials';
 import { uploadAvatar } from '@/lib/upload';
 import { API_URL } from '@/lib/api';
+import { fetchWithRetry, isNetworkError } from '@/lib/network';
+import { AccountDataSection } from '@/components/AccountDataSection';
 
 interface Creator {
   id: number;
@@ -55,7 +57,7 @@ export default function SettingsPage() {
     const fetchCreator = async () => {
       if (!user || !token) return;
       try {
-        const res = await fetch(`${API_URL}/api/creators/me`, {
+        const res = await fetchWithRetry(`${API_URL}/api/creators/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (res.status === 404) return;
@@ -70,6 +72,7 @@ export default function SettingsPage() {
         setDonationGoal(mine.donationGoal != null ? String(mine.donationGoal) : '');
         setSocials(mine.socialLinks || {});
       } catch (err) {
+        if (isNetworkError(err)) return;
         notify.error('Could not load settings', err);
       } finally {
         setLoading(false);
@@ -140,7 +143,7 @@ export default function SettingsPage() {
 
     setSaving(true);
     try {
-      const res = await fetch(`${API_URL}/api/creators/${creator.username}`, {
+      const res = await fetchWithRetry(`${API_URL}/api/creators/${creator.username}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -165,6 +168,7 @@ export default function SettingsPage() {
       setDirty(false);
       notify.success('Settings saved.');
     } catch (err) {
+      if (isNetworkError(err)) return;
       notify.error('Could not save settings', err);
     } finally {
       setSaving(false);
@@ -201,6 +205,9 @@ export default function SettingsPage() {
               <a href="/auth/username" className="text-primary hover:underline font-bold">
                 Go to Create Username
               </a>
+            </div>
+            <div className="card-brutal p-8">
+              <AccountDataSection />
             </div>
           </div>
         </div>
@@ -383,6 +390,10 @@ export default function SettingsPage() {
                 {saving ? 'Saving…' : 'Save changes'}
               </button>
             </div>
+          </div>
+
+          <div className="card-brutal p-8 mt-6">
+            <AccountDataSection />
           </div>
 
           <div className="mt-8">

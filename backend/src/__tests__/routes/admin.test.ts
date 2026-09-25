@@ -11,6 +11,11 @@ jest.mock("../../prisma", () => ({
     donation: {
       groupBy: jest.fn(),
     },
+    adminAuditLog: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+    },
   },
 }));
 
@@ -23,6 +28,7 @@ const mockedPrisma = prisma as unknown as {
   user: { count: jest.Mock; findMany: jest.Mock };
   creator: { count: jest.Mock };
   donation: { groupBy: jest.Mock };
+  adminAuditLog: { create: jest.Mock; findMany: jest.Mock; count: jest.Mock };
 };
 
 const ADMIN_WALLET = "GADMINWALLET";
@@ -34,6 +40,9 @@ describe("GET /api/admin/overview", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.ADMIN_WALLETS = ADMIN_WALLET;
+    mockedPrisma.adminAuditLog.create.mockResolvedValue({ id: 1 });
+    mockedPrisma.adminAuditLog.findMany.mockResolvedValue([]);
+    mockedPrisma.adminAuditLog.count.mockResolvedValue(0);
   });
 
   afterAll(() => {
@@ -127,5 +136,63 @@ describe("GET /api/admin/overview", () => {
       displayName: null,
       earningsByCurrency: {},
     });
+    expect(mockedPrisma.adminAuditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        adminId: 1,
+        adminWalletAddress: ADMIN_WALLET,
+        action: "admin.overview.viewed",
+        targetType: "admin",
+        targetId: "overview",
+      }),
+    });
+  });
+});
+
+describe("GET /api/admin/audit-logs", () => {
+  const originalAdminWallets = process.env.ADMIN_WALLETS;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.ADMIN_WALLETS = ADMIN_WALLET;
+    mockedPrisma.adminAuditLog.findMany.mockResolvedValue([
+      { id: 9, adminWalletAddress: ADMIN_WALLET, action: "admin.overview.viewed" },
+    ]);
+    mockedPrisma.adminAuditLog.count.mockResolvedValue(21);
+  });
+
+  afterAll(() => {
+    if (originalAdminWallets === undefined) delete process.env.ADMIN_WALLETS;
+    else process.env.ADMIN_WALLETS = originalAdminWallets;
+  });
+
+  it("returns a paginated, newest-first audit feed to an allowlisted admin", async () => {
+    const token = generateToken(1, ADMIN_WALLET);
+    const res = await request(app)
+      .get("/api/admin/audit-logs?page=2&limit=10")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.pagination).toEqual({ page: 2, limit: 10, total: 21, totalPages: 3 });
+    expect(mockedPrisma.adminAuditLog.findMany).toHaveBeenCalledWith({
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: 10,
+      take: 10,
+    });
+  });
+
+  it("rejects invalid audit-log pagination", async () => {
+    const token = generateToken(1, ADMIN_WALLET);
+    const res = await request(app)
+      .get("/api/admin/audit-logs?limit=101")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+    expect(mockedPrisma.adminAuditLog.findMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects unauthenticated audit-log reads", async () => {
+    const res = await request(app).get("/api/admin/audit-logs");
+    expect(res.status).toBe(401);
+    expect(mockedPrisma.adminAuditLog.findMany).not.toHaveBeenCalled();
   });
 });

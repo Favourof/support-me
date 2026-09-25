@@ -5,8 +5,16 @@ import prisma from '../prisma';
 import { generateToken } from '../middleware/auth';
 import { asyncHandler } from '../middleware/asyncHandler';
 import { validate } from '../middleware/validate';
-import { challengeSchema, verifySchema } from '../schemas/auth';
+import {
+  challengeSchema,
+  magicLinkRequestSchema,
+  magicLinkVerifySchema,
+  twitterCallbackSchema,
+  verifySchema,
+} from '../schemas/auth';
 import { UnauthorizedError } from '../errors/AppError';
+import { requestMagicLink, verifyMagicLink } from '../services/magicLink';
+import { completeTwitterAuth, startTwitterAuth } from '../services/twitterAuth';
 
 const router = Router();
 
@@ -85,6 +93,62 @@ router.post(
       hasProfile: !!creator,
       username: creator?.username,
     });
+  })
+);
+
+// Magic link (#15): email-only sign-in, the second auth method alongside
+// the wallet-signature flow above.
+router.post(
+  '/magic-link',
+  validate({ body: magicLinkRequestSchema }),
+  asyncHandler(async (req, res) => {
+    const { email } = req.body;
+
+    await requestMagicLink(email);
+
+    // Same response for a new email and a returning one: this endpoint
+    // must not be usable to enumerate which addresses already have an
+    // account. A rate-limited request is the one exception, surfaced as
+    // its own 429 (asyncHandler routes the thrown TooManyRequestsError to
+    // the global error handler) rather than folded into this message,
+    // since "you're sending too many requests" doesn't leak anything
+    // about the target address's account status.
+    return res.json({ message: 'If that email is valid, a sign-in link has been sent.' });
+  })
+);
+
+router.post(
+  '/magic-link/verify',
+  validate({ body: magicLinkVerifySchema }),
+  asyncHandler(async (req, res) => {
+    const { token } = req.body;
+
+    const session = await verifyMagicLink(token);
+
+    return res.json(session);
+  })
+);
+
+// Twitter/X OAuth (#14): the frontend flow in issue #10 calls these two
+// endpoints — /twitter to get the URL to redirect the user to, then
+// /twitter/callback once Twitter redirects back with a code.
+router.get(
+  '/twitter',
+  asyncHandler(async (req, res) => {
+    const redirectUrl = startTwitterAuth();
+    return res.json({ redirectUrl });
+  })
+);
+
+router.get(
+  '/twitter/callback',
+  validate({ query: twitterCallbackSchema }),
+  asyncHandler(async (req, res) => {
+    const { code, state } = req.query as unknown as { code: string; state: string };
+
+    const session = await completeTwitterAuth(code, state);
+
+    return res.json(session);
   })
 );
 

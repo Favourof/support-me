@@ -4,6 +4,29 @@ export interface RenderedEmail {
   text: string;
 }
 
+export interface DonationReceivedEmailContext {
+  /** The creator's own dashboard link, where they can see the full donation. */
+  dashboardUrl: string;
+  amount: number;
+  currency: string;
+  /** Truncated for display; the full sender address is never emailed. */
+  senderAddress: string;
+  message?: string | null;
+}
+
+export interface DonationConfirmationEmailContext {
+  creatorName: string;
+  amount: number;
+  currency: string;
+  transactionHash?: string | null;
+}
+
+export interface MagicLinkEmailContext {
+  /** Full verification URL (includes the token); never logged. */
+  verifyUrl: string;
+  expiresInMinutes: number;
+}
+
 export interface SubscriptionEmailContext {
   creatorName: string;
   amount: number;
@@ -168,6 +191,92 @@ export function subscriptionPaymentFailedEmail(ctx: PaymentFailedEmailContext): 
     `How to fix it: ${fix}`,
     "",
     `${ctaLabel}: ${ctx.manageUrl}`,
+  ].join("\n");
+
+  return { subject, html, text };
+}
+
+/** First 6 / last 4 characters, matching how Stellar addresses are
+ * conventionally shortened for display; never the full address. */
+function truncateAddress(address: string): string {
+  if (address.length <= 12) return address;
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+/** Notifies a creator that they received a one-time donation. */
+export function donationReceivedEmail(ctx: DonationReceivedEmailContext): RenderedEmail {
+  const amount = formatAmount(ctx.amount, ctx.currency);
+  const sender = truncateAddress(ctx.senderAddress);
+
+  const subject = `You received a ${amount} donation!`;
+
+  const html = layout(
+    "You've received a new donation",
+    `<p style="margin:0 0 12px;line-height:1.5;">Someone just supported you with <strong>${escapeHtml(amount)}</strong>.</p>
+        <p style="margin:0 0 12px;line-height:1.5;">From: <span style="font-family:monospace;">${escapeHtml(sender)}</span></p>
+        ${ctx.message ? `<p style="margin:0 0 12px;line-height:1.5;"><strong>Message:</strong> "${escapeHtml(ctx.message)}"</p>` : ""}`,
+    { label: "View dashboard", url: ctx.dashboardUrl }
+  );
+
+  const text = [
+    "You've received a new donation",
+    "",
+    `Someone just supported you with ${amount}.`,
+    `From: ${sender}`,
+    ...(ctx.message ? [`Message: "${ctx.message}"`] : []),
+    "",
+    `View dashboard: ${ctx.dashboardUrl}`,
+  ].join("\n");
+
+  return { subject, html, text };
+}
+
+/** Confirms to a supporter that their one-time donation was recorded. */
+export function donationConfirmationEmail(ctx: DonationConfirmationEmailContext): RenderedEmail {
+  const amount = formatAmount(ctx.amount, ctx.currency);
+
+  const subject = `Thanks for supporting ${ctx.creatorName}!`;
+
+  const html = layout(
+    `Thanks for supporting ${ctx.creatorName}!`,
+    `<p style="margin:0 0 12px;line-height:1.5;">Your donation of <strong>${escapeHtml(amount)}</strong> to <strong>${escapeHtml(ctx.creatorName)}</strong> was recorded.</p>
+        ${
+          ctx.transactionHash
+            ? `<p style="margin:0;font-size:13px;color:#78716c;word-break:break-all;">Transaction: ${escapeHtml(ctx.transactionHash)}</p>`
+            : ""
+        }`,
+    { label: "Support again", url: "https://supportme.app" }
+  );
+
+  const text = [
+    `Thanks for supporting ${ctx.creatorName}!`,
+    "",
+    `Your donation of ${amount} to ${ctx.creatorName} was recorded.`,
+    ...(ctx.transactionHash ? [`Transaction: ${ctx.transactionHash}`] : []),
+  ].join("\n");
+
+  return { subject, html, text };
+}
+
+/** The magic-link sign-in email (#15). */
+export function magicLinkEmail(ctx: MagicLinkEmailContext): RenderedEmail {
+  const subject = "Sign in to SupportMe";
+
+  const html = layout(
+    "Sign in to SupportMe",
+    `<p style="margin:0 0 12px;line-height:1.5;">Click below to sign in. This link expires in ${ctx.expiresInMinutes} minutes and can only be used once.</p>
+        <p style="margin:0;font-size:13px;color:#78716c;">If you didn't request this, you can safely ignore this email.</p>`,
+    { label: "Sign in", url: ctx.verifyUrl }
+  );
+
+  const text = [
+    "Sign in to SupportMe",
+    "",
+    `Click below to sign in. This link expires in ${ctx.expiresInMinutes} minutes and can only be used once.`,
+    "",
+    `Sign in: ${ctx.verifyUrl}`,
+    "",
+    "If you didn't request this, you can safely ignore this email.",
   ].join("\n");
 
   return { subject, html, text };
