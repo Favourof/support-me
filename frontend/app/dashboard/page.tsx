@@ -37,6 +37,7 @@ interface Donation {
   currency: string;
   message: string;
   transactionHash: string;
+  eventId?: string;
   createdAt: string;
 }
 
@@ -73,6 +74,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showShareCard, setShowShareCard] = useState(false);
+  const seenDonationEventIds = useRef(new Set<string>());
   const prices = usePrices();
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -232,6 +234,8 @@ export default function DashboardPage() {
         memo: string;
         timestamp: number;
         txHash: string;
+        eventId?: string;
+        currency?: string;
       };
       try {
         payload = JSON.parse(event.data);
@@ -241,15 +245,21 @@ export default function DashboardPage() {
 
       if (payload.creator !== creator.walletAddress) return;
 
+      const eventKey = payload.eventId || payload.txHash;
+      if (seenDonationEventIds.current.has(eventKey)) return;
+      seenDonationEventIds.current.add(eventKey);
+
       setDonations((prev) => {
-        if (prev.some((d) => d.transactionHash === payload.txHash)) return prev;
+        if (!payload.eventId && prev.some((d) => d.transactionHash === payload.txHash)) return prev;
+        if (payload.eventId && prev.some((d) => d.eventId === payload.eventId)) return prev;
         const newDonation: Donation = {
-          id: payload.txHash,
+          id: payload.eventId || payload.txHash,
           senderAddress: payload.donor,
           amount: Number(payload.amount) / 1e7,
-          currency: 'XLM',
+          currency: payload.currency || 'XLM',
           message: payload.memo,
           transactionHash: payload.txHash,
+          eventId: payload.eventId,
           createdAt: new Date(payload.timestamp * 1000).toISOString(),
         };
         return [newDonation, ...prev];

@@ -1,10 +1,11 @@
 import { Router } from "express";
-import { Prisma } from "@prisma/client";
+import { Donation, Prisma } from "@prisma/client";
 import prisma from "../prisma";
 import { asyncHandler } from "../middleware/asyncHandler";
 import { validate } from "../middleware/validate";
 import { createDonationSchema, listDonationsQuerySchema } from "../schemas/donations";
 import { BadRequestError, NotFoundError } from "../errors/AppError";
+import { notifyDonationConfirmation, notifyDonationReceived } from "../services/donationNotifications";
 
 const router = Router();
 
@@ -17,7 +18,10 @@ router.get(
       page: number;
       limit: number;
     };
-    const where = creatorUsername ? { creator: { username: creatorUsername } } : undefined;
+    const where = {
+      ...(creatorUsername ? { creator: { username: creatorUsername } } : {}),
+      verified: true,
+    };
 
     const [items, total] = await Promise.all([
       prisma.donation.findMany({
@@ -29,7 +33,18 @@ router.get(
       prisma.donation.count({ where }),
     ]);
 
-    return res.json({ items, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+    const responseItems = items.map((item) => {
+      const eventId =
+        item.rpcEventId ||
+        item.onChainEventId ||
+        (item.transactionHash ? `${item.transactionHash}:0:0` : undefined);
+      return eventId ? { ...item, eventId } : item;
+    });
+
+    return res.json({
+      items: responseItems,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
   })
 );
 
@@ -40,10 +55,33 @@ router.post(
     const idempotencyKey = req.header("Idempotency-Key")?.trim();
     if (!idempotencyKey) throw new BadRequestError("Idempotency-Key header is required");
 
-    const { creatorUsername, senderAddress, amount, currency, message, transactionHash } = req.body;
+    const {
+      creatorUsername,
+      senderAddress,
+      amount,
+      currency,
+      message,
+      transactionHash,
+    } = req.body;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    // A browser donation transaction currently contains one DonatedEvent, so
+    // the client-facing report uses the canonical operation/event indices 0.
+    // The Soroban listener owns the authoritative index and can reconcile the
+    // row using its RPC-provided event identity.
+    const operationIndex = 0;
+    const eventIndex = 0;
+    const onChainEventId = transactionHash
+      ? `${transactionHash}:${operationIndex}:${eventIndex}`
+      : undefined;
+    const verified = !transactionHash;
 
-    const record = async (client: Prisma.TransactionClient) => {
+    // Tracks whether this request is the one that actually inserted the
+    // donation row, as opposed to an idempotent replay returning the
+    // original. Notifications must only fire once, on the real insert —
+    // not on every retry a client makes with the same Idempotency-Key.
+    let isNewDonation = false;
+
+    const record = async (client: Prisma.TransactionClient): Promise<Donation> => {
       await client.donationIdempotencyKey.deleteMany({ where: { expiresAt: { lt: new Date() } } });
       const existing = await client.donationIdempotencyKey.findUnique({
         where: { key: idempotencyKey },
@@ -55,16 +93,48 @@ router.post(
       const creator = await client.creator.findUnique({ where: { username: creatorUsername } });
       if (!creator) throw new NotFoundError("Creator not found");
 
-      const donation = await client.donation.create({
-        data: { creatorId: creator.id, senderAddress, amount, currency, message, transactionHash },
-      });
+      const donation = onChainEventId
+        ? await client.donation.upsert({
+            where: {
+              transactionHash_operationIndex_eventIndex: {
+                transactionHash,
+                operationIndex,
+                eventIndex,
+              },
+            },
+            update: {},
+            create: {
+              creatorId: creator.id,
+              senderAddress,
+              amount,
+              currency,
+              message,
+              transactionHash,
+              onChainEventId,
+              operationIndex,
+              eventIndex,
+              verified: false,
+            },
+          })
+        : await client.donation.create({
+            data: {
+              creatorId: creator.id,
+              senderAddress,
+              amount,
+              currency,
+              message,
+              transactionHash,
+              verified,
+            },
+          });
       await client.donationIdempotencyKey.create({
         data: { key: idempotencyKey, donationId: donation.id, expiresAt },
       });
+      isNewDonation = true;
       return donation;
     };
 
-    let donation;
+    let donation: Donation;
     try {
       donation = await prisma.$transaction(record);
     } catch (error) {
@@ -76,11 +146,51 @@ router.post(
           include: { donation: true },
         });
         if (existing && existing.expiresAt > new Date()) donation = existing.donation;
-        else throw error;
+        else if (onChainEventId) {
+          // The event listener may have won the unique on-chain identity race
+          // while this request was being processed. Its row is the canonical
+          // result, so return it rather than surfacing a spurious 500.
+          const onChainDonation = await prisma.donation.findUnique({
+            where: {
+              transactionHash_operationIndex_eventIndex: {
+                transactionHash,
+                operationIndex,
+                eventIndex,
+              },
+            },
+          });
+          if (!onChainDonation) throw error;
+          donation = onChainDonation;
+        } else throw error;
       } else {
         throw error;
       }
     }
+
+    // The donation is already committed; an email-provider outage must
+    // never make the request fail or look like the donation didn't go
+    // through. Each notification is independent (allSettled, not
+    // Promise.all) so the creator's email failing doesn't skip the
+    // supporter's, and each failure is logged individually.
+    if (isNewDonation) {
+      const [creatorResult, supporterResult] = await Promise.allSettled([
+        notifyDonationReceived(donation),
+        notifyDonationConfirmation(donation),
+      ]);
+      if (creatorResult.status === "rejected") {
+        console.error(
+          `Donation-received email failed for donation ${donation.id}:`,
+          (creatorResult.reason as Error).message
+        );
+      }
+      if (supporterResult.status === "rejected") {
+        console.error(
+          `Donation-confirmation email failed for donation ${donation.id}:`,
+          (supporterResult.reason as Error).message
+        );
+      }
+    }
+
     return res.status(201).json(donation);
   })
 );

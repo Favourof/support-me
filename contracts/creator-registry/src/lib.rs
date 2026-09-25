@@ -8,10 +8,13 @@
 //! sync with real on-chain transfers.
 
 use common::CreatorProfile;
-use soroban_sdk::{contract, contractevent, contractimpl, symbol_short, Address, Env, String, Symbol};
+use soroban_sdk::{
+    contract, contractevent, contractimpl, symbol_short, Address, Env, String, Symbol,
+};
 
 const ADMIN_KEY: Symbol = symbol_short!("admin");
 const DONATION_KEY: Symbol = symbol_short!("don_ctr");
+const USERNAMES_KEY: Symbol = symbol_short!("usernames");
 
 /// Emitted whenever a new creator profile is registered.
 #[contractevent(topics = ["created"])]
@@ -36,7 +39,9 @@ impl CreatorRegistryContract {
             "registry already initialized"
         );
         env.storage().instance().set(&ADMIN_KEY, &admin);
-        env.storage().instance().set(&DONATION_KEY, &donation_contract);
+        env.storage()
+            .instance()
+            .set(&DONATION_KEY, &donation_contract);
     }
 
     /// Point the registry at a new donation contract (e.g. after a
@@ -48,7 +53,9 @@ impl CreatorRegistryContract {
             .get(&ADMIN_KEY)
             .expect("registry not initialized");
         admin.require_auth();
-        env.storage().instance().set(&DONATION_KEY, &donation_contract);
+        env.storage()
+            .instance()
+            .set(&DONATION_KEY, &donation_contract);
     }
 
     /// Register a new creator profile. Must be signed by the creator.
@@ -62,6 +69,12 @@ impl CreatorRegistryContract {
             "creator already registered"
         );
 
+        let username_key = (USERNAMES_KEY, username.clone());
+        assert!(
+            !env.storage().persistent().has(&username_key),
+            "username already registered"
+        );
+
         let profile = CreatorProfile {
             address: creator.clone(),
             username: username.clone(),
@@ -71,6 +84,7 @@ impl CreatorRegistryContract {
         };
 
         env.storage().persistent().set(&creator, &profile);
+        env.storage().persistent().set(&username_key, &creator);
         CreatedEvent { creator, username }.publish(&env);
 
         profile
@@ -109,8 +123,14 @@ impl CreatorRegistryContract {
                 created_at: env.ledger().timestamp(),
             });
 
-        profile.total_donations += amount;
-        profile.donation_count += 1;
+        profile.total_donations = profile
+            .total_donations
+            .checked_add(amount)
+            .expect("lifetime donation total overflow");
+        profile.donation_count = profile
+            .donation_count
+            .checked_add(1)
+            .expect("donation count overflow");
 
         env.storage().persistent().set(&creator, &profile);
     }
@@ -152,6 +172,24 @@ mod tests {
     }
 
     #[test]
+    fn test_register_creator_rejects_duplicate_username() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreatorRegistryContract, ());
+        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+
+        let first_creator = Address::generate(&env);
+        let second_creator = Address::generate(&env);
+        let username = String::from_bytes(&env, b"awesome_dev");
+
+        client.register_creator(&first_creator, &username);
+        let result = client.try_register_creator(&second_creator, &username);
+
+        assert!(result.is_err());
+        assert!(client.get_creator(&second_creator).is_none());
+    }
+
+    #[test]
     fn test_record_donation_updates_stats() {
         let env = Env::default();
         env.mock_all_auths();
@@ -169,6 +207,65 @@ mod tests {
         let profile = client.get_creator(&creator).unwrap();
         assert_eq!(profile.total_donations, 1500);
         assert_eq!(profile.donation_count, 2);
+    }
+
+    #[test]
+    fn test_record_donation_accepts_lifetime_total_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreatorRegistryContract, ());
+        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let donation_contract = Address::generate(&env);
+        let creator = Address::generate(&env);
+        client.initialize(&admin, &donation_contract);
+
+        client.record_donation(&donation_contract, &creator, &(i128::MAX - 1));
+        client.record_donation(&donation_contract, &creator, &1);
+
+        let profile = client.get_creator(&creator).unwrap();
+        assert_eq!(profile.total_donations, i128::MAX);
+        assert_eq!(profile.donation_count, 2);
+    }
+
+    #[test]
+    fn test_record_donation_rejects_lifetime_total_overflow_without_mutating() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreatorRegistryContract, ());
+        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let donation_contract = Address::generate(&env);
+        let creator = Address::generate(&env);
+        client.initialize(&admin, &donation_contract);
+        client.record_donation(&donation_contract, &creator, &i128::MAX);
+
+        let result = client.try_record_donation(&donation_contract, &creator, &1);
+        assert!(result.is_err());
+
+        let profile = client.get_creator(&creator).unwrap();
+        assert_eq!(profile.total_donations, i128::MAX);
+        assert_eq!(profile.donation_count, 1);
+    }
+
+    #[test]
+    fn test_record_donation_requires_caller_authentication() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreatorRegistryContract, ());
+        let client = CreatorRegistryContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let donation_contract = Address::generate(&env);
+        let creator = Address::generate(&env);
+        client.initialize(&admin, &donation_contract);
+        env.set_auths(&[]);
+
+        assert!(client
+            .try_record_donation(&donation_contract, &creator, &1)
+            .is_err());
     }
 
     #[test]
