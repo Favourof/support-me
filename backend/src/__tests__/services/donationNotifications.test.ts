@@ -29,6 +29,11 @@ const DONATION: Donation = {
   currency: "XLM",
   message: "keep it up!",
   transactionHash: "abc123",
+  verified: true,
+  onChainEventId: null,
+  rpcEventId: null,
+  operationIndex: 0,
+  eventIndex: 0,
   createdAt: new Date("2026-08-01T00:00:00.000Z"),
 };
 

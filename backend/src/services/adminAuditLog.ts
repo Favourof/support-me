@@ -43,7 +43,9 @@ export async function recordAdminAction(
 
   const data: Prisma.AdminAuditLogUncheckedCreateInput = {
     adminId,
-    adminWalletAddress: req.user.walletAddress,
+    // Nullable on User: admins may sign in via magic-link/OAuth before ever
+    // connecting a wallet, and the audit row must still record who acted.
+    adminWalletAddress: req.user.walletAddress ?? "",
     action: input.action,
     targetType: input.targetType,
     targetId: input.targetId,

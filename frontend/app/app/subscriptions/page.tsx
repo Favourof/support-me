@@ -9,6 +9,8 @@ import { AppNav } from '@/components/AppNav';
 import { Skeleton } from '@/components/Skeleton';
 import { cancelSubscription } from '@/lib/contract';
 import { API_URL } from '@/lib/api';
+import { fetchWithRetry, isNetworkError } from '@/lib/network';
+import { describeChargeFailure } from '@/lib/failures';
 
 interface Subscription {
   id: number;
@@ -41,13 +43,16 @@ function SubscriptionsList() {
 
   useEffect(() => {
     if (!user?.walletAddress) return;
-    fetch(`${API_URL}/api/subscriptions?supporterAddress=${encodeURIComponent(user.walletAddress)}`)
+    fetchWithRetry(`${API_URL}/api/subscriptions?supporterAddress=${encodeURIComponent(user.walletAddress)}`)
       .then((res) => {
         if (!res.ok) throw new Error('The server returned an error. Please try again.');
         return res.json();
       })
       .then(setSubscriptions)
-      .catch((err) => notify.error('Could not load your subscriptions', err))
+      .catch((err) => {
+        if (isNetworkError(err)) return;
+        notify.error('Could not load your subscriptions', err);
+      })
       .finally(() => setLoading(false));
   }, [user?.walletAddress]);
 
@@ -63,7 +68,7 @@ function SubscriptionsList() {
       // The on-chain cancel (which also revokes the allowance) is what stops
       // charges; this call only updates our records, so a failure here is a
       // warning rather than an error.
-      const recordRes = await fetch(`${API_URL}/api/subscriptions/${subscription.id}/cancel`, {
+      const recordRes = await fetchWithRetry(`${API_URL}/api/subscriptions/${subscription.id}/cancel`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       }).catch(() => null);
@@ -132,7 +137,7 @@ function SubscriptionsList() {
                   </p>
                   {subscription.lastError && (
                     <p className="text-xs text-red-600 font-bold mt-0.5">
-                      Last charge failed — {subscription.lastError}
+                      Last charge failed — {describeChargeFailure(subscription.lastError)}
                     </p>
                   )}
                 </div>

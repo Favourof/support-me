@@ -34,6 +34,7 @@ import { sendEmail } from "../../services/email/mailer";
 
 const mockedPrisma = prisma as unknown as {
   creator: { findUnique: jest.Mock };
+  user: { findUnique: jest.Mock };
   donation: { findMany: jest.Mock; count: jest.Mock; create: jest.Mock; upsert: jest.Mock };
   donationIdempotencyKey: {
     deleteMany: jest.Mock;

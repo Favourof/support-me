@@ -8,9 +8,11 @@ import subscriptionsRouter from "./routes/subscriptions";
 import eventsRouter from "./routes/events";
 import adminRouter from "./routes/admin";
 import activityRouter from "./routes/activity";
+import accountRouter from "./routes/account";
 import { errorHandler } from "./middleware/errorHandler";
 import { requestLogger } from "./middleware/requestLogger";
 import { checkSorobanRpc } from "./services/sorobanHealth";
+import { executorHealth } from "./services/executorHealth";
 
 const app = express();
 
@@ -20,10 +22,26 @@ app.use(express.json());
 
 app.get("/health", async (req, res) => {
   const sorobanRpc = await checkSorobanRpc();
+  const subscriptionExecutor = executorHealth.getHealth();
+  const status =
+    subscriptionExecutor.status === "unhealthy"
+      ? "unhealthy"
+      : sorobanRpc.status === "ok"
+        ? "ok"
+        : "degraded";
   return res.json({
-    status: sorobanRpc.status === "ok" ? "ok" : "degraded",
+    status,
     timestamp: new Date().toISOString(),
-    dependencies: { sorobanRpc },
+    dependencies: { sorobanRpc, subscriptionExecutor },
+  });
+});
+
+app.get("/health/executor", (req, res) => {
+  const subscriptionExecutor = executorHealth.getHealth();
+  return res.json({
+    status: subscriptionExecutor.status === "unhealthy" ? "unhealthy" : "ok",
+    timestamp: new Date().toISOString(),
+    subscriptionExecutor,
   });
 });
 
@@ -35,6 +53,7 @@ app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/events", eventsRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/activity", activityRouter);
+app.use("/api/account", accountRouter);
 
 app.use((req, res) => {
   return res.status(404).json({

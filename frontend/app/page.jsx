@@ -98,7 +98,10 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-background">
       {/* Navigation */}
-      <nav className="sticky top-0 w-full z-50 bg-background border-b-4 border-ink">
+      <nav
+        style={{ top: 'var(--offline-banner-h, 0px)' }}
+        className="sticky w-full z-50 bg-background border-b-4 border-ink"
+      >
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center gap-4">
           <div className="text-xl sm:text-2xl font-extrabold text-ink shrink-0 tracking-tight">
             SupportMe

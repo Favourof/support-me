@@ -17,12 +17,12 @@ import {
   MAX_MEMO_LENGTH,
   approveAllowance,
   subscribe,
-  DonationError,
   MAX_CHARGE_INTERVAL_DAYS,
 } from '@/lib/contract';
 import { availableAssetCodes, getAsset } from '@/lib/assets';
 import { getPlatform } from '@/lib/socials';
 import { API_URL } from '@/lib/api';
+import { describeDonationFailure } from '@/lib/failures';
 import { useAuth } from '@/context/AuthContext';
 import { Skeleton } from '@/components/Skeleton';
 import { TipJarLoader } from '@/components/TipJarLoader';
@@ -297,19 +297,8 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
       setDonationAmount('5');
       setDonationMessage('');
     } catch (err) {
-      // Three user-facing categories: 'wallet' (not connected / signing
-      // rejected), 'simulation' (invalid amount, insufficient balance), and
-      // 'network' (RPC/submission/confirmation failure).
-      if (err instanceof DonationError) {
-        const titles: Record<string, string> = {
-          wallet: 'Wallet error',
-          simulation: 'Transaction rejected',
-          network: 'Network error',
-        };
-        notify.error(titles[err.type] || 'Donation failed', err);
-      } else {
-        notify.error('Donation failed', err);
-      }
+      const failure = describeDonationFailure(err, 'donate');
+      notify.error(failure.title, `${failure.message} ${failure.action}`);
     } finally {
       setSending(false);
       setTxStatus(null);
@@ -403,16 +392,8 @@ export default function CreatorProfileClient({ params }: { params: Promise<{ use
       setDonationAmount('5');
       setDonationMessage('');
     } catch (err) {
-      if (err instanceof DonationError) {
-        const titles: Record<string, string> = {
-          wallet: 'Wallet error',
-          simulation: 'Transaction rejected',
-          network: 'Network error',
-        };
-        notify.error(titles[err.type] || 'Could not start subscription', err);
-      } else {
-        notify.error('Could not start subscription', err);
-      }
+      const failure = describeDonationFailure(err, 'subscribe');
+      notify.error(failure.title, `${failure.message} ${failure.action}`);
     } finally {
       setSending(false);
       setTxStatus(null);
