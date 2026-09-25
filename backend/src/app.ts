@@ -11,6 +11,8 @@ import adminRouter from "./routes/admin";
 import activityRouter from "./routes/activity";
 import accountRouter from "./routes/account";
 import emailWebhooksRouter from "./routes/emailWebhooks";
+import seoRouter from "./routes/seo";
+import emailPreviewRouter from "./routes/emailPreview";
 import { errorHandler } from "./middleware/errorHandler";
 import { requestLogger } from "./middleware/requestLogger";
 import { checkSorobanRpc } from "./services/sorobanHealth";
@@ -28,6 +30,9 @@ app.use(cors());
 app.use("/api/webhooks/email", express.raw({ type: "application/json" }), emailWebhooksRouter);
 
 app.use(express.json());
+
+// SEO routes (standard paths: /sitemap.xml, /robots.txt)
+app.use("/", seoRouter);
 
 app.get("/health", async (req, res) => {
   const sorobanRpc = await checkSorobanRpc();
@@ -64,6 +69,8 @@ app.use("/api/events", eventsRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/activity", activityRouter);
 app.use("/api/account", accountRouter);
+app.use("/api/email/preview", emailPreviewRouter);
+app.use("/api", seoRouter);
 
 app.use((req, res) => {
   return res.status(404).json({
@@ -76,4 +83,3 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 export default app;
-
