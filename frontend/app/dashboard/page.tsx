@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import Link from 'next/link';
 import { notify } from '@/lib/notify';
 import { HugeiconsIcon } from '@hugeicons/react';
@@ -66,12 +66,28 @@ export default function DashboardPage() {
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
   const [donationPage, setDonationPage] = useState(1);
   const [hasMoreDonations, setHasMoreDonations] = useState(false);
+  const [totalDonations, setTotalDonations] = useState<number | null>(null);
+  const [totalPages, setTotalPages] = useState<number>(1);
   const [loadingMoreDonations, setLoadingMoreDonations] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const [infiniteScroll, setInfiniteScroll] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showShareCard, setShowShareCard] = useState(false);
   const seenDonationEventIds = useRef(new Set<string>());
   const prices = usePrices();
+
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const prevScrollYRef = useRef<number | null>(null);
+
+  // Preserve scroll position when older donations are appended
+  useLayoutEffect(() => {
+    if (prevScrollYRef.current !== null && typeof window !== 'undefined') {
+      const savedY = prevScrollYRef.current;
+      prevScrollYRef.current = null;
+      window.scrollTo({ top: savedY, behavior: 'instant' });
+    }
+  }, [donations]);
 
   useEffect(() => {
     const fetchCreator = async () => {
@@ -109,9 +125,15 @@ export default function DashboardPage() {
           const items = Array.isArray(donationsData) ? donationsData : donationsData.items || [];
           setDonations(items);
           setDonationPage(1);
-          setHasMoreDonations(
-            Boolean(donationsData.pagination && donationsData.pagination.page < donationsData.pagination.totalPages)
-          );
+          if (donationsData.pagination) {
+            setTotalDonations(donationsData.pagination.total);
+            setTotalPages(donationsData.pagination.totalPages);
+            setHasMoreDonations(donationsData.pagination.page < donationsData.pagination.totalPages);
+          } else {
+            setTotalDonations(Array.isArray(donationsData) ? donationsData.length : items.length);
+            setTotalPages(1);
+            setHasMoreDonations(false);
+          }
         }
 
         if (resWithdrawals.ok) {
@@ -131,6 +153,10 @@ export default function DashboardPage() {
   const loadMoreDonations = async () => {
     if (!creator || !token || loadingMoreDonations || !hasMoreDonations) return;
     setLoadingMoreDonations(true);
+    setLoadMoreError(null);
+    if (typeof window !== 'undefined') {
+      prevScrollYRef.current = window.scrollY;
+    }
     try {
       const nextPage = donationPage + 1;
       const response = await fetch(
@@ -139,22 +165,59 @@ export default function DashboardPage() {
       );
       if (!response.ok) throw new Error('The server returned an error. Please try again.');
       const data = await response.json();
-      setDonations((current) => [...current, ...(data.items || [])]);
+      const newItems: Donation[] = data.items || [];
+
+      setDonations((current) => {
+        const existingIds = new Set(current.map((d) => String(d.id)));
+        const existingHashes = new Set(current.map((d) => d.transactionHash).filter(Boolean));
+        const deduplicated = newItems.filter(
+          (item) => !existingIds.has(String(item.id)) && (!item.transactionHash || !existingHashes.has(item.transactionHash))
+        );
+        return [...current, ...deduplicated];
+      });
+
       setDonationPage(nextPage);
-      setHasMoreDonations(nextPage < data.pagination.totalPages);
+      if (data.pagination) {
+        setTotalDonations(data.pagination.total);
+        setTotalPages(data.pagination.totalPages);
+        setHasMoreDonations(nextPage < data.pagination.totalPages);
+      } else {
+        setHasMoreDonations(false);
+      }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not load older donations';
+      setLoadMoreError(msg);
       notify.error('Could not load more donations', err);
     } finally {
       setLoadingMoreDonations(false);
     }
   };
 
+  // Automatically fetch next page when user scrolls near the bottom of the list
   useEffect(() => {
-    for (const donation of donations) {
-      if (donation.eventId) seenDonationEventIds.current.add(donation.eventId);
-      if (donation.transactionHash) seenDonationEventIds.current.add(donation.transactionHash);
+    if (!infiniteScroll || !hasMoreDonations || loadingMoreDonations || loading || loadMoreError) {
+      return;
     }
-  }, [donations]);
+
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry?.isIntersecting) {
+          loadMoreDonations();
+        }
+      },
+      { rootMargin: '200px' }
+    );
+
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+    };
+  }, [infiniteScroll, hasMoreDonations, loadingMoreDonations, loading, loadMoreError, donationPage, creator, token]);
 
   // Subscribe to the backend's SSE stream so newly confirmed on-chain
   // donations show up here live, without needing to refresh the page.
@@ -201,6 +264,7 @@ export default function DashboardPage() {
         };
         return [newDonation, ...prev];
       });
+      setTotalDonations((prev) => (prev !== null ? prev + 1 : null));
 
       notify.success('New donation received!', {
         icon: <HugeiconsIcon icon={PartyIcon} size={18} strokeWidth={1.5} />,
@@ -355,7 +419,27 @@ export default function DashboardPage() {
 
           {/* Recent Activity — tips received and cash-outs, newest first */}
           <div className="card-brutal p-6">
-            <h2 className="text-lg font-extrabold text-ink mb-4">Recent Activity</h2>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-extrabold text-ink">Recent Activity</h2>
+                {totalDonations !== null && (
+                  <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-brand-light-purple/40 border border-ink/20 text-ink">
+                    {donations.length} of {totalDonations} tips
+                  </span>
+                )}
+              </div>
+              {hasMoreDonations && (
+                <label className="flex items-center gap-2 text-xs font-bold text-ink cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={infiniteScroll}
+                    onChange={(e) => setInfiniteScroll(e.target.checked)}
+                    className="rounded border-ink/40 text-brand-purple focus:ring-brand-purple"
+                  />
+                  <span>Infinite scroll</span>
+                </label>
+              )}
+            </div>
             {activity.length === 0 ? (
               <p className="text-muted font-medium">No activity yet. Share your profile link to get started!</p>
             ) : (
@@ -452,15 +536,48 @@ export default function DashboardPage() {
                 })}
               </ul>
             )}
-            {hasMoreDonations && (
-              <button
-                type="button"
-                onClick={loadMoreDonations}
-                disabled={loadingMoreDonations}
-                className="btn-brutal btn-brutal-white mt-4"
+            {loadMoreError && (
+              <div className="mt-4 p-3 bg-red-50 border-2 border-red-500 rounded-lg flex items-center justify-between gap-2 text-sm text-red-700">
+                <span>{loadMoreError}</span>
+                <button
+                  type="button"
+                  onClick={loadMoreDonations}
+                  className="px-3 py-1 bg-red-600 text-white font-bold rounded text-xs hover:bg-red-700 transition-colors"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {loadingMoreDonations && (
+              <div
+                data-testid="donations-loading-indicator"
+                className="mt-4 p-3 bg-brand-light-purple/20 border-2 border-dashed border-ink/20 rounded-lg flex items-center justify-center gap-2 text-sm font-bold text-ink"
               >
-                {loadingMoreDonations ? 'Loading…' : 'Load older donations'}
-              </button>
+                <div className="w-4 h-4 border-2 border-brand-purple border-t-transparent rounded-full animate-spin" />
+                <span>Loading older donations…</span>
+              </div>
+            )}
+
+            {hasMoreDonations && !loadingMoreDonations && (
+              <div className="mt-4 flex flex-col items-center gap-2">
+                <button
+                  type="button"
+                  onClick={loadMoreDonations}
+                  className="btn-brutal btn-brutal-white w-full sm:w-auto"
+                >
+                  Load older donations
+                </button>
+                {infiniteScroll && (
+                  <div ref={sentinelRef} className="h-1 w-full" aria-hidden="true" />
+                )}
+              </div>
+            )}
+
+            {!hasMoreDonations && totalDonations !== null && donations.length > 20 && (
+              <p className="text-center text-xs text-muted font-bold mt-4 pt-4 border-t border-ink/10">
+                All {totalDonations} donations loaded
+              </p>
             )}
           </div>
         </div>

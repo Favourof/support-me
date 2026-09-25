@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import DashboardPage from '@/app/dashboard/page';
 import { useAuth } from '@/context/AuthContext';
 import { toast } from 'sonner';
@@ -57,6 +57,41 @@ class FakeEventSource {
   }
 }
 
+class FakeIntersectionObserver {
+  static instances: FakeIntersectionObserver[] = [];
+  callback: IntersectionObserverCallback;
+  elements = new Set<Element>();
+
+  constructor(callback: IntersectionObserverCallback) {
+    this.callback = callback;
+    FakeIntersectionObserver.instances.push(this);
+  }
+
+  observe(element: Element) {
+    this.elements.add(element);
+  }
+
+  unobserve(element: Element) {
+    this.elements.delete(element);
+  }
+
+  disconnect() {
+    this.elements.clear();
+  }
+
+  triggerIntersect(isIntersecting = true) {
+    const entries = Array.from(this.elements).map(
+      (target) =>
+        ({
+          isIntersecting,
+          target,
+          intersectionRatio: isIntersecting ? 1 : 0,
+        } as unknown as IntersectionObserverEntry)
+    );
+    this.callback(entries, this as unknown as IntersectionObserver);
+  }
+}
+
 const mockUseAuth = vi.mocked(useAuth);
 
 const creator = {
@@ -105,7 +140,7 @@ function mockFetchByUrl({
 }: {
   creator?: unknown;
   creatorNotFound?: boolean;
-  donations?: unknown;
+  donations?: unknown | ((url: string) => Response | Promise<Response>);
   withdrawals?: unknown;
 }) {
   vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
@@ -119,7 +154,15 @@ function mockFetchByUrl({
       }
       return Promise.resolve(jsonResponse(creator ?? null));
     }
-    if (url.includes('/api/donations')) return Promise.resolve(jsonResponse(donations ?? []));
+    if (url.includes('/api/donations')) {
+      if (typeof donations === 'function') {
+        return Promise.resolve(donations(url));
+      }
+      if (donations && typeof donations === 'object' && 'ok' in (donations as Record<string, unknown>)) {
+        return Promise.resolve(donations as Response);
+      }
+      return Promise.resolve(jsonResponse(donations ?? []));
+    }
     return Promise.resolve(jsonResponse({ prices: {} }));
   });
 }
@@ -135,6 +178,8 @@ describe('DashboardPage', () => {
     });
     FakeEventSource.instances = [];
     vi.stubGlobal('EventSource', FakeEventSource);
+    FakeIntersectionObserver.instances = [];
+    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
     vi.stubGlobal('fetch', vi.fn());
   });
 
@@ -223,5 +268,204 @@ describe('DashboardPage', () => {
       'New donation received!',
       expect.objectContaining({ icon: expect.anything() })
     );
+  });
+
+  it('loads donations incrementally with pagination and displays count', async () => {
+    const donation1 = { ...donation, id: 1, message: 'first page donation', transactionHash: 'tx1' };
+    const donation2 = { ...donation, id: 2, message: 'second page donation', transactionHash: 'tx2' };
+
+    mockFetchByUrl({
+      creator,
+      donations: (url: string) => {
+        if (url.includes('page=2')) {
+          return jsonResponse({
+            items: [donation2],
+            pagination: { page: 2, limit: 20, total: 2, totalPages: 2 },
+          });
+        }
+        return jsonResponse({
+          items: [donation1],
+          pagination: { page: 1, limit: 20, total: 2, totalPages: 2 },
+        });
+      },
+    });
+
+    render(<DashboardPage />);
+
+    await waitFor(() => expect(screen.getByText('first page donation')).toBeInTheDocument());
+    expect(screen.getByText('1 of 2 tips')).toBeInTheDocument();
+    expect(screen.queryByText('second page donation')).not.toBeInTheDocument();
+
+    const loadMoreBtn = screen.getByRole('button', { name: /load older donations/i });
+    expect(loadMoreBtn).toBeInTheDocument();
+
+    act(() => {
+      loadMoreBtn.click();
+    });
+
+    await waitFor(() => expect(screen.getByText('second page donation')).toBeInTheDocument());
+    expect(screen.getByText('first page donation')).toBeInTheDocument();
+    expect(screen.getByText('2 of 2 tips')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /load older donations/i })).not.toBeInTheDocument();
+  });
+
+  it('shows a loading indicator while fetching the next page', async () => {
+    let resolvePage2: (value: Response) => void;
+    const page2Promise = new Promise<Response>((resolve) => {
+      resolvePage2 = resolve;
+    });
+
+    mockFetchByUrl({
+      creator,
+      donations: (url: string) => {
+        if (url.includes('page=2')) {
+          return page2Promise;
+        }
+        return jsonResponse({
+          items: [donation],
+          pagination: { page: 1, limit: 20, total: 2, totalPages: 2 },
+        });
+      },
+    });
+
+    render(<DashboardPage />);
+    await waitFor(() => expect(screen.getByText('nice work')).toBeInTheDocument());
+
+    const loadMoreBtn = screen.getByRole('button', { name: /load older donations/i });
+    act(() => {
+      loadMoreBtn.click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('donations-loading-indicator')).toBeInTheDocument();
+      expect(screen.getByText('Loading older donations…')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      resolvePage2!(
+        jsonResponse({
+          items: [{ ...donation, id: 2, message: 'next donation', transactionHash: 'tx2' }],
+          pagination: { page: 2, limit: 20, total: 2, totalPages: 2 },
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('donations-loading-indicator')).not.toBeInTheDocument();
+      expect(screen.getByText('next donation')).toBeInTheDocument();
+    });
+  });
+
+  it('triggers next page fetch via infinite scroll when sentinel intersects', async () => {
+    const donation1 = { ...donation, id: 1, message: 'page 1 tip', transactionHash: 'tx1' };
+    const donation2 = { ...donation, id: 2, message: 'infinite scroll tip', transactionHash: 'tx2' };
+
+    mockFetchByUrl({
+      creator,
+      donations: (url: string) => {
+        if (url.includes('page=2')) {
+          return jsonResponse({
+            items: [donation2],
+            pagination: { page: 2, limit: 20, total: 2, totalPages: 2 },
+          });
+        }
+        return jsonResponse({
+          items: [donation1],
+          pagination: { page: 1, limit: 20, total: 2, totalPages: 2 },
+        });
+      },
+    });
+
+    render(<DashboardPage />);
+    await waitFor(() => expect(screen.getByText('page 1 tip')).toBeInTheDocument());
+
+    expect(FakeIntersectionObserver.instances.length).toBeGreaterThan(0);
+    const observer = FakeIntersectionObserver.instances[FakeIntersectionObserver.instances.length - 1];
+
+    act(() => {
+      observer.triggerIntersect(true);
+    });
+
+    await waitFor(() => expect(screen.getByText('infinite scroll tip')).toBeInTheDocument());
+  });
+
+  it('preserves scroll position when older donations are loaded', async () => {
+    const scrollToSpy = vi.fn();
+    vi.stubGlobal('scrollTo', scrollToSpy);
+    window.scrollTo = scrollToSpy;
+    Object.defineProperty(window, 'scrollY', { value: 600, writable: true, configurable: true });
+
+    mockFetchByUrl({
+      creator,
+      donations: (url: string) => {
+        if (url.includes('page=2')) {
+          return jsonResponse({
+            items: [{ ...donation, id: 2, message: 'scrolled item', transactionHash: 'tx2' }],
+            pagination: { page: 2, limit: 20, total: 2, totalPages: 2 },
+          });
+        }
+        return jsonResponse({
+          items: [donation],
+          pagination: { page: 1, limit: 20, total: 2, totalPages: 2 },
+        });
+      },
+    });
+
+    render(<DashboardPage />);
+    await waitFor(() => expect(screen.getByText('nice work')).toBeInTheDocument());
+
+    const loadMoreBtn = screen.getByRole('button', { name: /load older donations/i });
+    act(() => {
+      loadMoreBtn.click();
+    });
+
+    await waitFor(() => expect(screen.getByText('scrolled item')).toBeInTheDocument());
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 600, behavior: 'instant' });
+  });
+
+  it('displays error and allows retrying if loading next page fails', async () => {
+    let failPage2 = true;
+    mockFetchByUrl({
+      creator,
+      donations: (url: string) => {
+        if (url.includes('page=2')) {
+          if (failPage2) {
+            return jsonResponse({ error: 'Database timeout' }, false, 500);
+          }
+          return jsonResponse({
+            items: [{ ...donation, id: 2, message: 'recovered donation', transactionHash: 'tx2' }],
+            pagination: { page: 2, limit: 20, total: 2, totalPages: 2 },
+          });
+        }
+        return jsonResponse({
+          items: [donation],
+          pagination: { page: 1, limit: 20, total: 2, totalPages: 2 },
+        });
+      },
+    });
+
+    render(<DashboardPage />);
+    await waitFor(() => expect(screen.getByText('nice work')).toBeInTheDocument());
+
+    const loadMoreBtn = screen.getByRole('button', { name: /load older donations/i });
+    act(() => {
+      loadMoreBtn.click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('The server returned an error. Please try again.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+    });
+
+    failPage2 = false;
+    const retryBtn = screen.getByRole('button', { name: /retry/i });
+    act(() => {
+      retryBtn.click();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('recovered donation')).toBeInTheDocument();
+      expect(screen.queryByText('The server returned an error. Please try again.')).not.toBeInTheDocument();
+    });
   });
 });
