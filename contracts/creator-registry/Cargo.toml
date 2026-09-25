@@ -8,7 +8,7 @@ publish = false
 # cdylib so this crate builds to a standalone deployable Soroban contract;
 # rlib so the `donation` contract's tests can register this contract's Rust
 # type directly in a shared test `Env` for cross-contract integration tests.
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }

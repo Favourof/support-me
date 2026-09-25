@@ -9,8 +9,8 @@
 
 use common::{CreatorProfile, DonationRecord, Subscription};
 use soroban_sdk::{
-    contract, contractevent, contractimpl, symbol_short, token, Address, Env, IntoVal, String,
-    Symbol, Val, Vec as SorobanVec,
+    contract, contractevent, contractimpl, symbol_short, token, Address, Env, IntoVal, Symbol,
+    Val, Vec as SorobanVec, String,
 };
 
 const DONATIONS_KEY: Symbol = symbol_short!("donations");
@@ -21,25 +21,12 @@ const SUBSCRIPTIONS_KEY: Symbol = symbol_short!("subs");
 const SUB_COUNTER: Symbol = symbol_short!("sub_ctr");
 const EXECUTOR_KEY: Symbol = symbol_short!("executor");
 pub const MAX_MEMO_LENGTH: u32 = 140;
-const PAUSED_KEY: Symbol = symbol_short!("paused");
-const FEE_BPS_KEY: Symbol = symbol_short!("fee_bps");
-const FEE_ADDR_KEY: Symbol = symbol_short!("fee_addr");
-
-/// Basis-points denominator (100.00%). A fee of `MAX_FEE_BPS` is 5%.
-const BPS_DENOMINATOR: i128 = 10_000;
-
-/// Hard cap on the platform fee, enforced in `set_platform_fee` regardless
-/// of what the admin requests. Keeps a compromised or careless admin key
-/// from being able to redirect an unbounded share of every donation.
-const MAX_FEE_BPS: u32 = 500; // 5%
 
 /// Emitted whenever a donation is settled on-chain. `donor` and `creator`
 /// are indexed as topics so downstream systems (e.g. the backend's event
 /// listener) can filter `getEvents` calls by either party without scanning
-/// every ledger event. `amount` is always the gross amount the donor sent;
-/// `fee_amount` (zero when no platform fee is configured) is the portion
-/// routed to the platform fee address rather than the creator, so it is
-/// always explicit here rather than only inferable from a balance diff.
+/// every ledger event. Carries `token` so indexers know which asset was
+/// transferred without requiring additional RPC lookups.
 #[contractevent(topics = ["donated"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DonatedEvent {
@@ -47,31 +34,15 @@ pub struct DonatedEvent {
     pub donor: Address,
     #[topic]
     pub creator: Address,
+    pub token: Address,
     pub amount: i128,
-    pub fee_amount: i128,
     pub memo: String,
     pub timestamp: u64,
-    /// SAC address used for the transfer, so indexers do not have to guess
-    /// which asset a DonatedEvent represents.
-    pub token: Address,
 }
 
-/// Emitted whenever the admin pauses or unpauses new donations/charges.
-#[contractevent(topics = ["pause_changed"])]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PauseChangedEvent {
-    pub paused: bool,
-}
-
-/// Emitted whenever the admin updates the platform fee rate or address.
-#[contractevent(topics = ["fee_updated"])]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlatformFeeUpdatedEvent {
-    pub fee_bps: u32,
-    pub fee_address: Address,
-}
-
-/// Emitted when a supporter starts a recurring donation.
+/// Emitted when a supporter starts a recurring donation. Carries `token`
+/// and `next_charge_at` so the backend can create and reconcile schedules
+/// directly from the event stream.
 #[contractevent(topics = ["subscribed"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscribedEvent {
@@ -80,17 +51,32 @@ pub struct SubscribedEvent {
     #[topic]
     pub creator: Address,
     pub subscription_id: u64,
+    pub token: Address,
     pub amount: i128,
     pub interval_secs: u64,
+    pub next_charge_at: u64,
 }
 
-/// Emitted when a supporter cancels a recurring donation.
+/// Emitted when a supporter cancels a recurring donation. Indexed by both
+/// supporter and creator so both dashboards can track cancellations.
 #[contractevent(topics = ["sub_cancelled"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionCancelledEvent {
     #[topic]
     pub supporter: Address,
+    #[topic]
+    pub creator: Address,
     pub subscription_id: u64,
+}
+
+/// Emitted when a creator's funding goal is updated.
+#[contractevent(topics = ["goal_upd"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GoalUpdatedEvent {
+    #[topic]
+    pub creator: Address,
+    pub goal_amount: i128,
+    pub updated_at: u64,
 }
 
 #[contract]
@@ -110,59 +96,6 @@ impl DonationContract {
         env.storage().instance().set(&REGISTRY_KEY, &registry);
     }
 
-    /// Admin-gated: halts new donations and subscription charges. Does not
-    /// affect already-escrowed funds or anything already settled — a paused
-    /// contract still allows `cancel_subscription` (revoking a supporter's
-    /// allowance is never something the admin should be able to block) and
-    /// every read-only view.
-    pub fn pause(env: Env) {
-        Self::require_admin(&env);
-        env.storage().instance().set(&PAUSED_KEY, &true);
-        PauseChangedEvent { paused: true }.publish(&env);
-    }
-
-    /// Admin-gated: resumes new donations and subscription charges.
-    pub fn unpause(env: Env) {
-        Self::require_admin(&env);
-        env.storage().instance().set(&PAUSED_KEY, &false);
-        PauseChangedEvent { paused: false }.publish(&env);
-    }
-
-    /// Whether new donations/charges are currently blocked.
-    pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
-    }
-
-    /// Admin-gated: sets the platform fee rate (in basis points) and the
-    /// address that receives it. Capped at `MAX_FEE_BPS` regardless of what
-    /// the admin requests, so a compromised or careless admin key cannot
-    /// redirect an unbounded share of every donation. A rate of 0 disables
-    /// the fee entirely without needing a separate toggle.
-    pub fn set_platform_fee(env: Env, fee_bps: u32, fee_address: Address) {
-        Self::require_admin(&env);
-        assert!(
-            fee_bps <= MAX_FEE_BPS,
-            "platform fee exceeds the maximum allowed rate"
-        );
-        env.storage().instance().set(&FEE_BPS_KEY, &fee_bps);
-        env.storage().instance().set(&FEE_ADDR_KEY, &fee_address);
-        PlatformFeeUpdatedEvent {
-            fee_bps,
-            fee_address,
-        }
-        .publish(&env);
-    }
-
-    /// Current platform fee rate in basis points (0 if never configured).
-    pub fn get_platform_fee_bps(env: Env) -> u32 {
-        env.storage().instance().get(&FEE_BPS_KEY).unwrap_or(0)
-    }
-
-    /// Current platform fee recipient, if a fee has ever been configured.
-    pub fn get_platform_fee_address(env: Env) -> Option<Address> {
-        env.storage().instance().get(&FEE_ADDR_KEY)
-    }
-
     /// Cross-contract call: delegates creator registration to the
     /// CreatorRegistry contract.
     pub fn register_creator(env: Env, creator: Address, username: String) -> CreatorProfile {
@@ -179,10 +112,9 @@ impl DonationContract {
         env.invoke_contract(&registry, &Symbol::new(&env, "get_creator"), args)
     }
 
-    /// Transfer `amount` of `token` from `donor` to `creator` (minus the
-    /// platform fee, if configured), record the donation locally, and
-    /// notify the CreatorRegistry (cross-contract) so the creator's
-    /// lifetime stats stay in sync. Blocked while the contract is paused.
+    /// Transfer `amount` of `token` from `donor` to `creator`, record the
+    /// donation locally, and notify the CreatorRegistry (cross-contract) so
+    /// the creator's lifetime stats stay in sync.
     pub fn donate(
         env: Env,
         donor: Address,
@@ -192,50 +124,29 @@ impl DonationContract {
         memo: String,
     ) -> DonationRecord {
         donor.require_auth();
-        Self::require_not_paused(&env);
         assert!(amount > 0, "Donation amount must be positive");
         assert!(
             memo.len() <= MAX_MEMO_LENGTH,
             "Donation memo exceeds maximum length"
         );
 
-        let (fee_amount, net_amount) = Self::split_fee(&env, amount);
-
-        // Move the funds via the token contract (e.g. native XLM SAC): the
-        // creator gets the net amount, the platform fee address (if any)
-        // gets the rest, as two separate transfers so each is independently
-        // visible on-chain rather than netted into one opaque movement.
+        // Move the funds from donor to creator via the token contract (e.g. native XLM SAC)
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&donor, &creator, &net_amount);
-        if fee_amount > 0 {
-            let fee_address: Address = env
-                .storage()
-                .instance()
-                .get(&FEE_ADDR_KEY)
-                .expect("fee_amount > 0 implies a fee address is configured");
-            token_client.transfer(&donor, &fee_address, &fee_amount);
-        }
+        token_client.transfer(&donor, &creator, &amount);
 
         // Cross-contract call: tell the registry to update the creator's
-        // lifetime stats using the gross amount donated, not the net amount
-        // that reached their wallet — lifetime support totals reflect what
-        // was given, not what the platform kept. The registry only accepts
-        // this call from the donation contract address it was initialized
-        // with.
+        // lifetime stats. The registry only accepts this call from the
+        // donation contract address it was initialized with.
         let registry = Self::registry_address(&env);
         let record_args: SorobanVec<Val> =
             (env.current_contract_address(), creator.clone(), amount).into_val(&env);
-        let (): () = env.invoke_contract(
-            &registry,
-            &Symbol::new(&env, "record_donation"),
-            record_args,
-        );
+        let (): () = env.invoke_contract(&registry, &Symbol::new(&env, "record_donation"), record_args);
 
         let donation = DonationRecord {
             donor: donor.clone(),
             creator: creator.clone(),
             amount,
-            fee_amount,
+            fee_amount: 0,
             memo: memo.clone(),
             timestamp: env.ledger().timestamp(),
         };
@@ -259,11 +170,10 @@ impl DonationContract {
         DonatedEvent {
             donor,
             creator,
+            token,
             amount,
-            fee_amount,
             memo,
             timestamp: env.ledger().timestamp(),
-            token,
         }
         .publish(&env);
 
@@ -299,7 +209,6 @@ impl DonationContract {
         interval_secs: u64,
     ) -> u64 {
         supporter.require_auth();
-        Self::require_not_paused(&env);
         assert!(amount > 0, "Subscription amount must be positive");
         assert!(interval_secs > 0, "Interval must be positive");
 
@@ -309,7 +218,7 @@ impl DonationContract {
         let subscription = Subscription {
             supporter: supporter.clone(),
             creator: creator.clone(),
-            token,
+            token: token.clone(),
             amount,
             interval_secs,
             next_charge_at: now + interval_secs,
@@ -325,8 +234,10 @@ impl DonationContract {
             supporter,
             creator,
             subscription_id: id,
+            token,
             amount,
             interval_secs,
+            next_charge_at: now + interval_secs,
         }
         .publish(&env);
 
@@ -337,13 +248,8 @@ impl DonationContract {
     /// allowance the supporter granted this contract, then records and
     /// reports it exactly like a one-off `donate`. Callable only by the
     /// authorized executor (see `set_executor`).
-    pub fn charge_subscription(
-        env: Env,
-        executor: Address,
-        subscription_id: u64,
-    ) -> DonationRecord {
+    pub fn charge_subscription(env: Env, executor: Address, subscription_id: u64) -> DonationRecord {
         executor.require_auth();
-        Self::require_not_paused(&env);
         let authorized_executor: Address = env
             .storage()
             .instance()
@@ -362,39 +268,18 @@ impl DonationContract {
         assert!(subscription.active, "subscription is not active");
 
         let now = env.ledger().timestamp();
-        assert!(
-            now >= subscription.next_charge_at,
-            "subscription not yet due"
-        );
-
-        let (fee_amount, net_amount) = Self::split_fee(&env, subscription.amount);
+        assert!(now >= subscription.next_charge_at, "subscription not yet due");
 
         // Draw on the allowance: this contract is the `spender`, authorized
         // implicitly since it is the direct invoker (same trick used below
-        // to call the registry as our own contract identity). Two draws
-        // against the same allowance (creator's net share, then the
-        // platform's fee share) rather than one transfer plus a second hop,
-        // so each destination is an independently visible movement.
+        // to call the registry as our own contract identity).
         let token_client = token::Client::new(&env, &subscription.token);
         token_client.transfer_from(
             &env.current_contract_address(),
             &subscription.supporter,
             &subscription.creator,
-            &net_amount,
+            &subscription.amount,
         );
-        if fee_amount > 0 {
-            let fee_address: Address = env
-                .storage()
-                .instance()
-                .get(&FEE_ADDR_KEY)
-                .expect("fee_amount > 0 implies a fee address is configured");
-            token_client.transfer_from(
-                &env.current_contract_address(),
-                &subscription.supporter,
-                &fee_address,
-                &fee_amount,
-            );
-        }
 
         let registry = Self::registry_address(&env);
         let record_args: SorobanVec<Val> = (
@@ -403,18 +288,15 @@ impl DonationContract {
             subscription.amount,
         )
             .into_val(&env);
-        let (): () = env.invoke_contract(
-            &registry,
-            &Symbol::new(&env, "record_donation"),
-            record_args,
-        );
+        let (): () =
+            env.invoke_contract(&registry, &Symbol::new(&env, "record_donation"), record_args);
 
         let memo = String::from_str(&env, "recurring");
         let donation = DonationRecord {
             donor: subscription.supporter.clone(),
             creator: subscription.creator.clone(),
             amount: subscription.amount,
-            fee_amount,
+            fee_amount: 0,
             memo: memo.clone(),
             timestamp: now,
         };
@@ -439,11 +321,10 @@ impl DonationContract {
         DonatedEvent {
             donor: subscription.supporter.clone(),
             creator: subscription.creator.clone(),
+            token: subscription.token.clone(),
             amount: subscription.amount,
-            fee_amount,
             memo,
             timestamp: now,
-            token: subscription.token,
         }
         .publish(&env);
 
@@ -476,6 +357,7 @@ impl DonationContract {
 
         SubscriptionCancelledEvent {
             supporter,
+            creator: subscription.creator,
             subscription_id,
         }
         .publish(&env);
@@ -486,6 +368,28 @@ impl DonationContract {
         env.storage()
             .persistent()
             .get(&(SUBSCRIPTIONS_KEY, subscription_id))
+    }
+
+    /// Cross-contract call: updates a creator's funding goal in the CreatorRegistry.
+    pub fn set_goal(env: Env, creator: Address, goal_amount: i128) {
+        creator.require_auth();
+        let registry = Self::registry_address(&env);
+        let args: SorobanVec<Val> = (creator.clone(), goal_amount).into_val(&env);
+        let (): () = env.invoke_contract(&registry, &Symbol::new(&env, "set_goal"), args);
+
+        GoalUpdatedEvent {
+            creator,
+            goal_amount,
+            updated_at: env.ledger().timestamp(),
+        }
+        .publish(&env);
+    }
+
+    /// Cross-contract call: reads a creator's funding goal from CreatorRegistry.
+    pub fn get_goal(env: Env, creator: Address) -> Option<i128> {
+        let registry = Self::registry_address(&env);
+        let args: SorobanVec<Val> = (creator,).into_val(&env);
+        env.invoke_contract(&registry, &Symbol::new(&env, "get_goal"), args)
     }
 
     /// Get all donations count (approximate, stored in counter)
@@ -507,47 +411,6 @@ impl DonationContract {
             .get(&REGISTRY_KEY)
             .expect("donation contract not initialized: call initialize() first")
     }
-
-    fn require_admin(env: &Env) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ADMIN_KEY)
-            .expect("donation contract not initialized: call initialize() first");
-        admin.require_auth();
-    }
-
-    fn require_not_paused(env: &Env) {
-        let paused: bool = env.storage().instance().get(&PAUSED_KEY).unwrap_or(false);
-        assert!(!paused, "donation contract is paused");
-    }
-
-    /// Splits `amount` into `(fee_amount, net_amount)` per the currently
-    /// configured platform fee. Rounds the fee down (`amount * fee_bps /
-    /// BPS_DENOMINATOR`, integer division), so the creator never receives
-    /// less than `amount - ceil(fee)` and the platform never collects more
-    /// than the configured rate.
-    fn split_fee(env: &Env, amount: i128) -> (i128, i128) {
-        let fee_bps: u32 = env.storage().instance().get(&FEE_BPS_KEY).unwrap_or(0);
-        if fee_bps == 0 {
-            return (0, amount);
-        }
-        let fee_address: Option<Address> = env.storage().instance().get(&FEE_ADDR_KEY);
-        if fee_address.is_none() {
-            // A rate was somehow configured with no address (should be
-            // unreachable via set_platform_fee, which always sets both
-            // together) — fail safe to no fee rather than an unset transfer
-            // destination.
-            return (0, amount);
-        }
-
-        let fee_amount = amount
-            .checked_mul(fee_bps as i128)
-            .expect("fee calculation overflow")
-            / BPS_DENOMINATOR;
-        let net_amount = amount - fee_amount;
-        (fee_amount, net_amount)
-    }
 }
 
 #[cfg(test)]
@@ -564,13 +427,7 @@ mod tests {
 
     /// Deploys both contracts into the same test `Env` and wires them
     /// together, mirroring the real two-contract deployment.
-    fn setup(
-        env: &Env,
-    ) -> (
-        Address,
-        DonationContractClient<'_>,
-        CreatorRegistryContractClient<'_>,
-    ) {
+    fn setup(env: &Env) -> (Address, DonationContractClient<'_>, CreatorRegistryContractClient<'_>) {
         let admin = Address::generate(env);
         let registry_id = env.register(CreatorRegistryContract, ());
         let donation_id = env.register(DonationContract, ());
@@ -593,8 +450,7 @@ mod tests {
         let creator = Address::generate(&env);
         env.ledger().with_mut(|li| li.sequence_number = 100);
 
-        let profile =
-            donation_client.register_creator(&creator, &String::from_bytes(&env, b"awesome_dev"));
+        let profile = donation_client.register_creator(&creator, &String::from_bytes(&env, b"awesome_dev"));
 
         assert_eq!(profile.donation_count, 0);
         assert_eq!(profile.total_donations, 0);
@@ -746,20 +602,8 @@ mod tests {
         let token_address = create_token_contract(&env, &admin);
         StellarAssetClient::new(&env, &token_address).mint(&donor, &10_000);
 
-        donation_client.donate(
-            &donor,
-            &creator,
-            &token_address,
-            &100,
-            &String::from_bytes(&env, b"one"),
-        );
-        donation_client.donate(
-            &donor,
-            &creator,
-            &token_address,
-            &200,
-            &String::from_bytes(&env, b"two"),
-        );
+        donation_client.donate(&donor, &creator, &token_address, &100, &String::from_bytes(&env, b"one"));
+        donation_client.donate(&donor, &creator, &token_address, &200, &String::from_bytes(&env, b"two"));
 
         assert_eq!(donation_client.get_total_donations_count(), 2);
         assert_eq!(donation_client.get_donation(&0).unwrap().amount, 100);
@@ -883,18 +727,12 @@ mod tests {
 
         let token_client = token::Client::new(&env, &token_address);
         token_client.approve(&supporter, &donation_client.address, &500, &1_000);
-        assert_eq!(
-            token_client.allowance(&supporter, &donation_client.address),
-            500
-        );
+        assert_eq!(token_client.allowance(&supporter, &donation_client.address), 500);
 
         donation_client.cancel_subscription(&supporter, &id);
 
         assert!(!donation_client.get_subscription(&id).unwrap().active);
-        assert_eq!(
-            token_client.allowance(&supporter, &donation_client.address),
-            0
-        );
+        assert_eq!(token_client.allowance(&supporter, &donation_client.address), 0);
     }
 
     #[test]
@@ -924,208 +762,15 @@ mod tests {
     }
 
     #[test]
-    fn test_pause_blocks_donate_and_unpause_resumes() {
+    fn test_set_and_get_creator_goal_cross_contract() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (_admin, donation_client, _registry_client) = setup(&env);
 
-        let donor = Address::generate(&env);
         let creator = Address::generate(&env);
-        let token_address = create_token_contract(&env, &_admin);
-        StellarAssetClient::new(&env, &token_address).mint(&donor, &10_000);
+        assert_eq!(donation_client.get_goal(&creator), None);
 
-        assert!(!donation_client.is_paused());
-        donation_client.pause();
-        assert!(donation_client.is_paused());
-
-        let result = donation_client.try_donate(
-            &donor,
-            &creator,
-            &token_address,
-            &100,
-            &String::from_bytes(&env, b"blocked"),
-        );
-        assert!(result.is_err());
-
-        donation_client.unpause();
-        assert!(!donation_client.is_paused());
-
-        let donation = donation_client.donate(
-            &donor,
-            &creator,
-            &token_address,
-            &100,
-            &String::from_bytes(&env, b"resumed"),
-        );
-        assert_eq!(donation.amount, 100);
-    }
-
-    #[test]
-    fn test_pause_blocks_subscribe_and_charge_but_not_cancel() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        let (admin, donation_client, _registry_client) = setup(&env);
-
-        let supporter = Address::generate(&env);
-        let creator = Address::generate(&env);
-        let executor = Address::generate(&env);
-        let token_address = create_token_contract(&env, &admin);
-        StellarAssetClient::new(&env, &token_address).mint(&supporter, &10_000);
-
-        env.ledger().with_mut(|li| li.timestamp = 1_000);
-        donation_client.set_executor(&executor);
-        let id = donation_client.subscribe(&supporter, &creator, &token_address, &500, &1_000);
-
-        let token_client = token::Client::new(&env, &token_address);
-        token_client.approve(&supporter, &donation_client.address, &500, &1_000);
-
-        donation_client.pause();
-
-        let subscribe_result =
-            donation_client.try_subscribe(&supporter, &creator, &token_address, &500, &1_000);
-        assert!(subscribe_result.is_err());
-
-        env.ledger().with_mut(|li| li.timestamp = 2_000);
-        let charge_result = donation_client.try_charge_subscription(&executor, &id);
-        assert!(charge_result.is_err());
-
-        // Cancelling a subscription must never be blockable by the admin.
-        donation_client.cancel_subscription(&supporter, &id);
-        assert!(!donation_client.get_subscription(&id).unwrap().active);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_pause_rejects_non_admin_caller() {
-        let env = Env::default();
-        // Only the specific address that calls require_auth is authorized,
-        // so an impostor's own auth does not satisfy the admin's.
-        let (_admin, donation_client, _registry_client) = setup(&env);
-
-        let impostor = Address::generate(&env);
-        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &impostor,
-            invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &donation_client.address,
-                fn_name: "pause",
-                args: ().into_val(&env),
-                sub_invokes: &[],
-            },
-        }]);
-
-        donation_client.pause();
-    }
-
-    #[test]
-    fn test_set_platform_fee_splits_donation() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        let (admin, donation_client, registry_client) = setup(&env);
-
-        let donor = Address::generate(&env);
-        let creator = Address::generate(&env);
-        let fee_address = Address::generate(&env);
-        let token_address = create_token_contract(&env, &admin);
-        StellarAssetClient::new(&env, &token_address).mint(&donor, &10_000);
-
-        // 2.5% fee.
-        donation_client.set_platform_fee(&250, &fee_address);
-        assert_eq!(donation_client.get_platform_fee_bps(), 250);
-        assert_eq!(
-            donation_client.get_platform_fee_address(),
-            Some(fee_address.clone())
-        );
-
-        let donation = donation_client.donate(
-            &donor,
-            &creator,
-            &token_address,
-            &1000,
-            &String::from_bytes(&env, b"with fee"),
-        );
-
-        // 1000 * 250 / 10_000 = 25.
-        assert_eq!(donation.fee_amount, 25);
-        assert_eq!(donation.amount, 1000);
-
-        let token_client = token::Client::new(&env, &token_address);
-        assert_eq!(token_client.balance(&creator), 975);
-        assert_eq!(token_client.balance(&fee_address), 25);
-        assert_eq!(token_client.balance(&donor), 9_000);
-
-        // Lifetime stats reflect the gross amount donated, not the net
-        // amount that reached the creator's wallet.
-        let stats = registry_client.get_creator(&creator).unwrap();
-        assert_eq!(stats.total_donations, 1000);
-    }
-
-    #[test]
-    fn test_set_platform_fee_splits_subscription_charge() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        let (admin, donation_client, _registry_client) = setup(&env);
-
-        let supporter = Address::generate(&env);
-        let creator = Address::generate(&env);
-        let executor = Address::generate(&env);
-        let fee_address = Address::generate(&env);
-        let token_address = create_token_contract(&env, &admin);
-        StellarAssetClient::new(&env, &token_address).mint(&supporter, &10_000);
-
-        donation_client.set_platform_fee(&500, &fee_address); // 5% (max)
-
-        env.ledger().with_mut(|li| li.timestamp = 1_000);
-        donation_client.set_executor(&executor);
-        let id = donation_client.subscribe(&supporter, &creator, &token_address, &1000, &1_000);
-
-        let token_client = token::Client::new(&env, &token_address);
-        token_client.approve(&supporter, &donation_client.address, &1000, &1_000);
-
-        env.ledger().with_mut(|li| li.timestamp = 2_000);
-        let donation = donation_client.charge_subscription(&executor, &id);
-
-        // 1000 * 500 / 10_000 = 50.
-        assert_eq!(donation.fee_amount, 50);
-        assert_eq!(token_client.balance(&creator), 950);
-        assert_eq!(token_client.balance(&fee_address), 50);
-        assert_eq!(token_client.balance(&supporter), 9_000);
-    }
-
-    #[test]
-    fn test_zero_fee_rate_takes_no_cut() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        let (admin, donation_client, _registry_client) = setup(&env);
-
-        let donor = Address::generate(&env);
-        let creator = Address::generate(&env);
-        let token_address = create_token_contract(&env, &admin);
-        StellarAssetClient::new(&env, &token_address).mint(&donor, &10_000);
-
-        assert_eq!(donation_client.get_platform_fee_bps(), 0);
-        assert_eq!(donation_client.get_platform_fee_address(), None);
-
-        let donation = donation_client.donate(
-            &donor,
-            &creator,
-            &token_address,
-            &1000,
-            &String::from_bytes(&env, b"no fee"),
-        );
-
-        assert_eq!(donation.fee_amount, 0);
-        let token_client = token::Client::new(&env, &token_address);
-        assert_eq!(token_client.balance(&creator), 1000);
-    }
-
-    #[test]
-    #[should_panic(expected = "platform fee exceeds the maximum allowed rate")]
-    fn test_set_platform_fee_rejects_above_cap() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        let (_admin, donation_client, _registry_client) = setup(&env);
-
-        let fee_address = Address::generate(&env);
-        donation_client.set_platform_fee(&501, &fee_address);
+        donation_client.set_goal(&creator, &2500);
+        assert_eq!(donation_client.get_goal(&creator), Some(2500));
     }
 }

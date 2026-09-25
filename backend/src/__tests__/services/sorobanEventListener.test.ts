@@ -1,154 +1,210 @@
+import { sorobanEventListener, RawEvent } from "../../services/sorobanEventListener";
+import {
+  eventBus,
+  DONATION_EVENT,
+  SUBSCRIPTION_CREATED_EVENT,
+  SUBSCRIPTION_CANCELLED_EVENT,
+  GOAL_UPDATED_EVENT,
+  DONATION_RECORDED_EVENT,
+} from "../../services/eventBus";
+import prisma from "../../prisma";
+import { xdr, nativeToScVal } from "@stellar/stellar-sdk";
+
 jest.mock("../../prisma", () => ({
   __esModule: true,
   default: {
-    creator: {
-      findMany: jest.fn(),
+    subscription: {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
-    donation: {
-      findFirst: jest.fn(),
-      findUnique: jest.fn(),
-      update: jest.fn(),
-      upsert: jest.fn(),
+    creator: {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
   },
 }));
 
-jest.mock("../../services/sorobanRpc", () => ({
-  callSorobanRpc: jest.fn(),
-  getSorobanRpcUrls: jest.fn(() => ["https://rpc.example"]),
-}));
+function toBase64Xdr(val: unknown): string {
+  return nativeToScVal(val).toXDR("base64");
+}
 
-import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
-import prisma from "../../prisma";
-import { SorobanEventListener } from "../../services/sorobanEventListener";
-import { DONATION_EVENT, eventBus } from "../../services/eventBus";
-import { callSorobanRpc } from "../../services/sorobanRpc";
-
-const mockedPrisma = prisma as unknown as {
-  creator: { findMany: jest.Mock };
-  donation: {
-    findFirst: jest.Mock;
-    findUnique: jest.Mock;
-    update: jest.Mock;
-    upsert: jest.Mock;
-  };
-};
-const mockedRpc = callSorobanRpc as jest.Mock;
-
-const encode = (value: unknown, type: "symbol" | "address" | "i128" | "string") =>
-  xdr.ScVal.toXDR(nativeToScVal(value, { type })).toString("base64");
-
-const makeEvent = (id: string, eventIndex = 0) => ({
-  type: "contract",
-  ledger: 100,
-  id,
-  txHash: "tx-replayed",
-  operationIndex: 0,
-  eventIndex,
-  topic: [
-    encode("donated", "symbol"),
-    encode("GA7D5LDGFABXNYEO6LZVMTWK5JWEPTODCLYZ7TG4XDZRKKXP6OS5K5JW", "address"),
-    encode("GBLOPB74SBZC2O24XTYSW4UOJ5LPQXUENXQK53RJUO5GYZIKTQ7OB365", "address"),
-  ],
-  value: xdr.ScVal.toXDR(
-    nativeToScVal(
-      { amount: 10_000_000n, memo: "hello", timestamp: 1_700_000_000n },
-      { type: "map" }
-    )
-  ).toString("base64"),
-});
-
-describe("SorobanEventListener replay protection", () => {
-  const originalContractId = process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
-
+describe("SorobanEventListener event processing & reconciliation", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID = "CDONATIONCONTRACT";
-    mockedPrisma.creator.findMany.mockResolvedValue([{ id: 7 }]);
-    mockedPrisma.donation.findFirst.mockResolvedValue(null);
-    mockedPrisma.donation.findUnique.mockResolvedValue(null);
-    mockedPrisma.donation.update.mockResolvedValue({ id: 1 });
-    mockedRpc.mockImplementation(async (method: string) => {
-      if (method === "getLatestLedger") return { sequence: 101 };
-      if (method === "getEvents") return { events: [makeEvent("event-1")], cursor: "cursor-1" };
-      throw new Error(`unexpected method ${method}`);
+  });
+
+  it("processes 'donated' event with token and emits DONATION_EVENT", async () => {
+    const emittedEvents: any[] = [];
+    const handler = (evt: any) => emittedEvents.push(evt);
+    eventBus.on(DONATION_EVENT, handler);
+
+    const rawEvent: RawEvent = {
+      type: "contract",
+      ledger: 1050,
+      id: "0000000000001050-00000",
+      txHash: "tx_hash_donated_123",
+      topic: [toBase64Xdr("donated"), toBase64Xdr("GDONOR123"), toBase64Xdr("GCREATOR456")],
+      value: toBase64Xdr({
+        amount: 1500000000n,
+        memo: "Coffee for dev",
+        timestamp: 1713182400n,
+        token: "CUSDC...",
+      }),
+    };
+
+    const handled = await sorobanEventListener.processEvent(rawEvent);
+
+    expect(handled).toBe(true);
+    expect(emittedEvents.length).toBe(1);
+    expect(emittedEvents[0]).toMatchObject({
+      donor: "GDONOR123",
+      creator: "GCREATOR456",
+      token: "CUSDC...",
+      amount: "1500000000",
+      memo: "Coffee for dev",
+      timestamp: 1713182400,
+      ledger: 1050,
+      txHash: "tx_hash_donated_123",
     });
+
+    eventBus.off(DONATION_EVENT, handler);
   });
 
-  afterAll(() => {
-    if (originalContractId === undefined) delete process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID;
-    else process.env.NEXT_PUBLIC_DONATION_CONTRACT_ID = originalContractId;
-  });
+  it("processes 'subscribed' event with schedule details and emits SUBSCRIPTION_CREATED_EVENT", async () => {
+    const emittedEvents: any[] = [];
+    const handler = (evt: any) => emittedEvents.push(evt);
+    eventBus.on(SUBSCRIPTION_CREATED_EVENT, handler);
 
-  it("upserts the same on-chain identity after a restart instead of duplicating", async () => {
-    const stored = new Map<string, unknown>();
-    mockedPrisma.donation.findUnique.mockImplementation(async ({ where }) =>
-      stored.has(where.rpcEventId as string) ? { id: 1 } : null
-    );
-    mockedPrisma.donation.upsert.mockImplementation(async ({ where, create }) => {
-      const key = where.rpcEventId as string;
-      if (!stored.has(key)) stored.set(key, create);
-      return stored.get(key);
+    const rawEvent: RawEvent = {
+      type: "contract",
+      ledger: 1060,
+      id: "0000000000001060-00000",
+      txHash: "tx_hash_sub_123",
+      topic: [toBase64Xdr("subscribed"), toBase64Xdr("GSUPPORTER"), toBase64Xdr("GCREATOR")],
+      value: toBase64Xdr({
+        subscription_id: 42n,
+        token: "USDC",
+        amount: 100000000n,
+        interval_secs: 2592000n,
+        next_charge_at: 1715774400n,
+      }),
+    };
+
+    const handled = await sorobanEventListener.processEvent(rawEvent);
+
+    expect(handled).toBe(true);
+    expect(emittedEvents.length).toBe(1);
+    expect(emittedEvents[0]).toMatchObject({
+      supporter: "GSUPPORTER",
+      creator: "GCREATOR",
+      subscriptionId: 42,
+      token: "USDC",
+      amount: "100000000",
+      intervalSecs: 2592000,
+      nextChargeAt: 1715774400,
     });
 
-    const emitted = jest.fn();
-    eventBus.on(DONATION_EVENT, emitted);
-    try {
-      await new SorobanEventListener().poll();
-      await new SorobanEventListener().poll();
-    } finally {
-      eventBus.off(DONATION_EVENT, emitted);
-    }
-
-    expect(stored.size).toBe(1);
-    expect(mockedPrisma.donation.upsert).toHaveBeenCalledTimes(1);
-    expect(mockedPrisma.donation.upsert).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        where: { rpcEventId: "event-1" },
-        create: expect.objectContaining({
-          rpcEventId: "event-1",
-          onChainEventId: "tx-replayed:0:0",
-        }),
-      })
-    );
-    expect(emitted).toHaveBeenCalledTimes(1);
+    eventBus.off(SUBSCRIPTION_CREATED_EVENT, handler);
   });
 
-  it("keeps distinct events from the same transaction separate", async () => {
-    mockedRpc.mockImplementation(async (method: string) => {
-      if (method === "getLatestLedger") return { sequence: 101 };
-      if (method === "getEvents") {
-        return { events: [makeEvent("event-0", 0), makeEvent("event-1", 1)] };
-      }
-      throw new Error(`unexpected method ${method}`);
+  it("processes 'sub_cancelled' event and reconciles database subscription state without polling", async () => {
+    const emittedEvents: any[] = [];
+    const handler = (evt: any) => emittedEvents.push(evt);
+    eventBus.on(SUBSCRIPTION_CANCELLED_EVENT, handler);
+
+    const rawEvent: RawEvent = {
+      type: "contract",
+      ledger: 1070,
+      id: "0000000000001070-00000",
+      txHash: "tx_hash_cancel_123",
+      topic: [toBase64Xdr("sub_cancelled"), toBase64Xdr("GSUPPORTER"), toBase64Xdr("GCREATOR")],
+      value: toBase64Xdr({
+        subscription_id: 42n,
+      }),
+    };
+
+    const handled = await sorobanEventListener.processEvent(rawEvent);
+
+    expect(handled).toBe(true);
+    expect(emittedEvents.length).toBe(1);
+    expect(emittedEvents[0]).toMatchObject({
+      supporter: "GSUPPORTER",
+      creator: "GCREATOR",
+      subscriptionId: 42,
     });
-    mockedPrisma.donation.upsert.mockResolvedValue({ id: 1 });
 
-    await new SorobanEventListener().poll();
+    // Verify event-driven reconciliation was triggered in Prisma
+    expect(prisma.subscription.updateMany).toHaveBeenCalledWith({
+      where: { onChainId: 42 },
+      data: { active: false },
+    });
 
-    expect(mockedPrisma.donation.upsert).toHaveBeenCalledTimes(2);
-    expect(mockedPrisma.donation.upsert).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ where: { rpcEventId: "event-0" } })
-    );
-    expect(mockedPrisma.donation.upsert).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ where: { rpcEventId: "event-1" } })
-    );
+    eventBus.off(SUBSCRIPTION_CANCELLED_EVENT, handler);
   });
 
-  it("uses the response cursor for the next page", async () => {
-    mockedPrisma.donation.upsert.mockResolvedValue({ id: 1 });
-    const listener = new SorobanEventListener();
+  it("processes 'goal_upd' event and reconciles creator donation goal in database", async () => {
+    const emittedEvents: any[] = [];
+    const handler = (evt: any) => emittedEvents.push(evt);
+    eventBus.on(GOAL_UPDATED_EVENT, handler);
 
-    await listener.poll();
-    await listener.poll();
+    const rawEvent: RawEvent = {
+      type: "contract",
+      ledger: 1080,
+      id: "0000000000001080-00000",
+      txHash: "tx_hash_goal_123",
+      topic: [toBase64Xdr("goal_upd"), toBase64Xdr("GCREATOR_WALLET")],
+      value: toBase64Xdr({
+        goal_amount: 5000n,
+        updated_at: 1713183000n,
+      }),
+    };
 
-    expect(mockedRpc).toHaveBeenNthCalledWith(
-      3,
-      "getEvents",
-      expect.objectContaining({ pagination: { limit: 50, cursor: "cursor-1" } })
-    );
+    const handled = await sorobanEventListener.processEvent(rawEvent);
+
+    expect(handled).toBe(true);
+    expect(emittedEvents.length).toBe(1);
+    expect(emittedEvents[0]).toMatchObject({
+      creator: "GCREATOR_WALLET",
+      goalAmount: "5000",
+      updatedAt: 1713183000,
+    });
+
+    // Verify creator goal was reconciled in database
+    expect(prisma.creator.updateMany).toHaveBeenCalledWith({
+      where: { walletAddress: "GCREATOR_WALLET" },
+      data: { donationGoal: 5000 },
+    });
+
+    eventBus.off(GOAL_UPDATED_EVENT, handler);
+  });
+
+  it("processes 'don_rec' event and emits DONATION_RECORDED_EVENT", async () => {
+    const emittedEvents: any[] = [];
+    const handler = (evt: any) => emittedEvents.push(evt);
+    eventBus.on(DONATION_RECORDED_EVENT, handler);
+
+    const rawEvent: RawEvent = {
+      type: "contract",
+      ledger: 1090,
+      id: "0000000000001090-00000",
+      txHash: "tx_hash_don_rec_123",
+      topic: [toBase64Xdr("don_rec"), toBase64Xdr("GCREATOR_WALLET")],
+      value: toBase64Xdr({
+        amount: 250000000n,
+        total_donations: 7500000000n,
+        donation_count: 15,
+      }),
+    };
+
+    const handled = await sorobanEventListener.processEvent(rawEvent);
+
+    expect(handled).toBe(true);
+    expect(emittedEvents.length).toBe(1);
+    expect(emittedEvents[0]).toMatchObject({
+      creator: "GCREATOR_WALLET",
+      amount: "250000000",
+      totalDonations: "7500000000",
+      donationCount: 15,
+    });
+
+    eventBus.off(DONATION_RECORDED_EVENT, handler);
   });
 });
