@@ -12,6 +12,14 @@ const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_LOOKBACK_LEDGERS = 100;
 const STROOPS_PER_UNIT = 10_000_000n;
 
+interface PendingDonationEvent {
+  payload: DonationEvent;
+  rpcEventId: string;
+  onChainEventId: string;
+  eventIndex: number;
+  operationIndex: number;
+}
+
 interface RawEvent {
   type: string;
   ledger: number;
@@ -133,6 +141,7 @@ export class SorobanEventListener {
   private cursor: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  private pendingEvents = new Map<string, PendingDonationEvent>();
 
   start(): void {
     const donationContractId = getDonationContractId();
@@ -167,6 +176,7 @@ export class SorobanEventListener {
     this.polling = true;
 
     try {
+      await this.retryPendingEvents();
       const donationContractId = getDonationContractId();
       if (!donationContractId) return;
 
@@ -222,6 +232,7 @@ export class SorobanEventListener {
         const isNew = await this.persistDonation(
           payload,
           rpcEventId,
+          onChainEventId,
           eventIndex,
           resolveOperationIndex(event)
         );
@@ -241,6 +252,35 @@ export class SorobanEventListener {
     }
   }
 
+  private async retryPendingEvents(): Promise<void> {
+    for (const [rpcEventId, pending] of this.pendingEvents) {
+      try {
+        const indexed = await this.persistDonation(
+          pending.payload,
+          pending.rpcEventId,
+          pending.onChainEventId,
+          pending.eventIndex,
+          pending.operationIndex
+        );
+        if (indexed) {
+          this.pendingEvents.delete(rpcEventId);
+          eventBus.emit(DONATION_EVENT, pending.payload);
+        } else {
+          const alreadyIndexed = await prisma.donation.findUnique({
+            where: { rpcEventId },
+            select: { id: true },
+          });
+          if (alreadyIndexed) this.pendingEvents.delete(rpcEventId);
+        }
+      } catch (error) {
+        console.error(
+          `SorobanEventListener: could not retry pending event ${rpcEventId}:`,
+          (error as Error).message
+        );
+      }
+    }
+  }
+
   /**
    * Index the event before publishing it to SSE clients. A replay hits the
    * unique RPC event identity and therefore cannot create a second row.
@@ -248,6 +288,7 @@ export class SorobanEventListener {
   private async persistDonation(
     payload: DonationEvent,
     rpcEventId: string,
+    onChainEventId: string,
     eventIndex: number,
     operationIndex: number
   ): Promise<boolean> {
@@ -266,12 +307,19 @@ export class SorobanEventListener {
 
     if (!creator) {
       // The public SSE feed is still useful when a creator has not yet created
-      // an off-chain profile. The cursor still advances so one unknown creator
-      // cannot block every later event; the warning makes this data-quality
-      // issue visible to operators.
+      // an off-chain profile. The event is queued for an in-process retry while
+      // the cursor advances so one unknown creator cannot block every later
+      // event.
       console.warn(
-        `SorobanEventListener: no off-chain creator found for ${payload.creator}; event ${rpcEventId} was not indexed`
+        `SorobanEventListener: no off-chain creator found for ${payload.creator}; event ${rpcEventId} was queued for retry`
       );
+      this.pendingEvents.set(rpcEventId, {
+        payload,
+        rpcEventId,
+        onChainEventId,
+        eventIndex,
+        operationIndex,
+      });
       return false;
     }
 
@@ -295,7 +343,7 @@ export class SorobanEventListener {
       currency: payload.currency,
       message: payload.memo,
       transactionHash: payload.txHash,
-      onChainEventId: rpcEventId,
+      onChainEventId,
       rpcEventId,
       operationIndex,
       eventIndex,
@@ -311,6 +359,7 @@ export class SorobanEventListener {
         transactionHash: payload.txHash,
         operationIndex,
         eventIndex,
+        verified: false,
       },
       select: { id: true },
     });
@@ -326,10 +375,7 @@ export class SorobanEventListener {
     await prisma.donation.upsert({
       where: { rpcEventId },
       update: authoritativeData,
-      create: {
-        ...authoritativeData,
-        onChainEventId: rpcEventId,
-      },
+      create: authoritativeData,
     });
     return true;
   }
