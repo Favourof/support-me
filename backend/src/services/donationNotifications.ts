@@ -1,7 +1,8 @@
 import { Donation } from "@prisma/client";
 import prisma from "../prisma";
 import { sendEmail } from "./email/mailer";
-import { donationConfirmationEmail, donationReceivedEmail } from "./email/templates";
+import { donationConfirmationEmail } from "./email/templates";
+import { emailService } from "./email/emailService";
 
 const dashboardUrl = (): string =>
   `${(process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "")}/app/dashboard`;
@@ -13,23 +14,40 @@ const dashboardUrl = (): string =>
  * address, since wallet sign-in never requires one.
  */
 export async function notifyDonationReceived(donation: Donation): Promise<boolean> {
-  const creator = await prisma.creator.findUnique({
-    where: { id: donation.creatorId },
-    include: { user: true },
-  });
-  if (!creator?.user.email) return false;
+  try {
+    const creator = await prisma.creator.findUnique({
+      where: { id: donation.creatorId },
+      include: { user: true },
+    });
+    if (!creator?.user.email) return false;
 
-  await sendEmail({
-    to: creator.user.email,
-    ...donationReceivedEmail({
-      dashboardUrl: dashboardUrl(),
+    let donorName: string | null = null;
+    if (donation.senderAddress && donation.senderAddress.toLowerCase() !== "anonymous") {
+      const senderCreator = await prisma.creator.findFirst({
+        where: { walletAddress: donation.senderAddress },
+      });
+      if (senderCreator) donorName = senderCreator.displayName || `@${senderCreator.username}`;
+    }
+
+    await emailService.sendDonationReceipt(creator.user.email, {
+      creatorName: creator.displayName || creator.username,
+      donorName,
+      donorAddress: donation.senderAddress,
       amount: donation.amount,
       currency: donation.currency,
-      senderAddress: donation.senderAddress,
       message: donation.message,
-    }),
-  });
-  return true;
+      timestamp: donation.createdAt,
+      transactionHash: donation.transactionHash,
+      dashboardUrl: `${dashboardUrl()}`,
+    });
+    return true;
+  } catch (error) {
+    console.error(
+      `notifyDonationReceived: failed to send receipt for donation ${donation.id}:`,
+      (error as Error).message
+    );
+    return false;
+  }
 }
 
 /**
